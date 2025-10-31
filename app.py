@@ -5,91 +5,68 @@ import plotly.express as px
 import re
 import io
 from datetime import datetime
-from google.cloud import storage
-from google.oauth2 import service_account
-import json
+import requests
 
 st.set_page_config(page_title="🚗 Análisis de Aprovisionamiento de Vehículos Nissan", layout="wide")
 st.title("🚗 Análisis de Aprovisionamiento de Vehículos Nissan")
 
-# --- Configuración de GCP ---
-@st.cache_resource
-def init_gcp_client():
-    """Inicializa el cliente de GCP Storage"""
-    try:
-        # Intentar obtener credenciales desde secrets de Streamlit
-        credentials_dict = st.secrets["gcp_service_account"]
-        credentials = service_account.Credentials.from_service_account_info(credentials_dict)
-        client = storage.Client(credentials=credentials, project=credentials_dict["project_id"])
-        return client
-    except Exception as e:
-        st.error(f"Error al conectar con GCP: {str(e)}")
-        return None
-
+# --- Configuración de URLs públicas ---
 @st.cache_data(ttl=3600)  # Cache por 1 hora
-def load_data_from_gcs(bucket_name, file_name):
-    """Carga datos desde Google Cloud Storage"""
+def load_data_from_url(url):
+    """Carga datos desde una URL pública"""
     try:
-        client = init_gcp_client()
-        if client is None:
-            return None
-        
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(file_name)
-        
-        # Descargar como string y leer con pandas
-        data = blob.download_as_string()
-        df = pd.read_csv(io.BytesIO(data))
-        
+        response = requests.get(url)
+        response.raise_for_status()  # Lanza error si la respuesta no es 200
+        df = pd.read_csv(io.StringIO(response.text))
         return df
     except Exception as e:
-        st.error(f"Error al cargar {file_name}: {str(e)}")
+        st.error(f"Error al cargar datos desde {url}: {str(e)}")
         return None
 
 # --- Usuario ---
 usuario = st.sidebar.text_input("Nombre de usuario", value="Usuario")
 
-# --- Configuración fija del bucket (no visible para el usuario) ---
-BUCKET_NAME = "bk_vn"
-FILE_ORDERS = "nissan/orders/vn_nissan_order.csv"
-FILE_COLORS = "nissan/orders/vn_nissan_colors.csv"
+# --- Configuración de URLs (las pondremos en secrets) ---
+
+URL_ORDERS = st.secrets["URL_ORDERS"]
+URL_COLORS = st.secrets["URL_COLORS"]
+
+# Mostrar URLs que se están usando (para debug)
+st.sidebar.write("🔗 URLs configuradas:")
+st.sidebar.write(f"Órdenes: {URL_ORDERS[:50]}...")
+st.sidebar.write(f"Colores: {URL_COLORS[:50]}...")
 
 # Botón de recarga en sidebar
 if st.sidebar.button("🔄 Recargar datos"):
     st.cache_data.clear()
     st.rerun()
 
-# --- Carga de datos desde GCS ---
-with st.spinner("📥 Cargando datos desde Google Cloud Storage..."):
-    df = load_data_from_gcs(BUCKET_NAME, FILE_ORDERS)
-    df_colores = load_data_from_gcs(BUCKET_NAME, FILE_COLORS)
+# --- Carga de datos desde URLs públicas ---
+with st.spinner("📥 Cargando datos desde URLs públicas..."):
+    df = load_data_from_url(URL_ORDERS)
+    df_colores = load_data_from_url(URL_COLORS)
 
 if df is None:
-    st.error("❌ No se pudo cargar el archivo de órdenes. Verifica la configuración de GCP y el nombre del bucket.")
+    st.error("❌ No se pudo cargar el archivo de órdenes.")
+    st.info(f"**URL usada:** {URL_ORDERS}")
     st.info("""
-    **Configuración necesaria:**
-    1. Crea un archivo `.streamlit/secrets.toml` con las credenciales de GCP
-    2. Formato del archivo:
+    **Solución:**
+    1. Verifica que el archivo CSV esté público en Google Cloud Storage
+    2. Asegúrate de que la URL sea correcta
+    3. Puedes configurar las URLs en Streamlit Secrets:
     ```toml
-    [gcp_service_account]
-    type = "service_account"
-    project_id = "tu-proyecto"
-    private_key_id = "key-id"
-    private_key = "-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"
-    client_email = "tu-email@proyecto.iam.gserviceaccount.com"
-    client_id = "123456789"
-    auth_uri = "https://accounts.google.com/o/oauth2/auth"
-    token_uri = "https://oauth2.googleapis.com/token"
-    auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-    client_x509_cert_url = "https://www.googleapis.com/robot/v1/metadata/x509/..."
+    url_orders = "https://storage.googleapis.com/tu-bucket/tu-archivo-orders.csv"
+    url_colors = "https://storage.googleapis.com/tu-bucket/tu-archivo-colors.csv"
     ```
     """)
     st.stop()
 
-st.sidebar.success("✅ Datos cargados desde GCS")
-
 if df_colores is not None:
     st.sidebar.success("✅ Datos de colores cargados")
+else:
+    st.sidebar.warning("⚠️ No se pudieron cargar los datos de colores")
+
+st.sidebar.success("✅ Datos cargados exitosamente")
 
 # --- Validación de columnas requeridas ---
 required_cols = ['CODIGO', 'ORIGEN', 'Stock', 'RES_IVN', 'RES_TRANS']
@@ -218,23 +195,34 @@ col1, col2 = st.columns(2)
 with col1:
     st.metric("Media de ventas", f"{prod['Media']:.2f}")
     st.metric("Coef. Variación", f"{prod['Coef_Variacion']*100:.2f}%")
-    st.write(f"Movimientos 4 meses: {prod['Movimientos_4_Meses']}")
-    st.progress(min(prod['Movimientos_4_Meses']/12, 1.0))
-    st.write(f"Movimientos 6 meses: {prod['Movimientos_6_Meses']}")
-    st.progress(min(prod['Movimientos_6_Meses']/12, 1.0))
+    
+    # Verificar si existen las columnas de movimientos antes de mostrarlas
+    if 'Movimientos_4_Meses' in prod:
+        st.write(f"Movimientos 4 meses: {prod['Movimientos_4_Meses']}")
+        st.progress(min(prod['Movimientos_4_Meses']/12, 1.0))
+    if 'Movimientos_6_Meses' in prod:
+        st.write(f"Movimientos 6 meses: {prod['Movimientos_6_Meses']}")
+        st.progress(min(prod['Movimientos_6_Meses']/12, 1.0))
+        
 with col2:
-    st.write(f"Movimientos 12 meses: {prod['Movimientos_12_Meses']}")
-    st.progress(min(prod['Movimientos_12_Meses']/12, 1.0))
-    tend_color = {'++':'green', '+':'lightgreen', '0':'gray', '-':'red', '--':'darkred'}
-    st.markdown(
-        f"**Tendencia:** <span style='color:{tend_color.get(prod['Tendencia'],'black')}; font-size:30px'>{prod['Tendencia']}</span>", 
-        unsafe_allow_html=True
-    )
-    estrat_color = {'A':'green', 'B':'gray', 'C':'yellow', 'D':'deepskyblue', 'E':'red'}
-    st.markdown(
-        f"**Estratificación:** <span style='color:{estrat_color.get(prod['ESTRAT'],'black')}; font-size:30px'>{prod['ESTRAT']}</span>", 
-        unsafe_allow_html=True
-    )
+    if 'Movimientos_12_Meses' in prod:
+        st.write(f"Movimientos 12 meses: {prod['Movimientos_12_Meses']}")
+        st.progress(min(prod['Movimientos_12_Meses']/12, 1.0))
+    
+    # Verificar si existen las columnas de tendencia y estratificación
+    if 'Tendencia' in prod:
+        tend_color = {'++':'green', '+':'lightgreen', '0':'gray', '-':'red', '--':'darkred'}
+        st.markdown(
+            f"**Tendencia:** <span style='color:{tend_color.get(prod['Tendencia'],'black')}; font-size:30px'>{prod['Tendencia']}</span>", 
+            unsafe_allow_html=True
+        )
+    if 'ESTRAT' in prod:
+        estrat_color = {'A':'green', 'B':'gray', 'C':'yellow', 'D':'deepskyblue', 'E':'red'}
+        st.markdown(
+            f"**Estratificación:** <span style='color:{estrat_color.get(prod['ESTRAT'],'black')}; font-size:30px'>{prod['ESTRAT']}</span>", 
+            unsafe_allow_html=True
+        )
+    
     st.metric("Stock de seguridad", f"{prod['Stock_Seguridad']:.0f}")
     st.metric("Stock Disponible", f"{prod['Stock_Disponible']:.0f}")
 
@@ -543,18 +531,11 @@ if df_colores is not None:
                     title='Top 5 colores por volumen de ventas'
                 )
                 st.plotly_chart(fig_pie_top, use_container_width=True)
-            
-
-            
-            # Tabla detallada expandible
-            with st.expander("📊 Ver distribución completa por rango de días"):
-                tabla_completa = df_colores_prod_sorted[['Sig. Color'] + rangos_existentes + ['Total']].copy()
-                st.dataframe(tabla_completa, use_container_width=True, hide_index=True)
     
     else:
         st.info(f"ℹ️ No hay datos de colores para el producto {sel}")
 else:
-    st.info("💡 Sube un archivo de análisis de colores en el sidebar para ver estadísticas detalladas")
+    st.info("💡 No se cargaron datos de colores")
 
 # --- Exportar datos ingresados ---
 st.subheader("📥 Descargar datos ingresados")
