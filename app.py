@@ -27,14 +27,8 @@ def load_data_from_url(url):
 usuario = st.sidebar.text_input("Nombre de usuario", value="Usuario")
 
 # --- Configuración de URLs (las pondremos en secrets) ---
-
 URL_ORDERS = st.secrets["URL_ORDERS"]
 URL_COLORS = st.secrets["URL_COLORS"]
-
-# Mostrar URLs que se están usando (para debug)
-st.sidebar.write("🔗 URLs configuradas:")
-st.sidebar.write(f"Órdenes: {URL_ORDERS[:50]}...")
-st.sidebar.write(f"Colores: {URL_COLORS[:50]}...")
 
 # Botón de recarga en sidebar
 if st.sidebar.button("🔄 Recargar datos"):
@@ -61,19 +55,75 @@ if df is None:
     """)
     st.stop()
 
+# --- DIAGNÓSTICO Y MAPEO DE COLUMNAS ---
+st.sidebar.subheader("🔍 Diagnóstico de Columnas")
+st.sidebar.write(f"Total de columnas cargadas: {len(df.columns)}")
+
+# --- Mapeo flexible de columnas ---
+def map_column_names(df):
+    """Mapea nombres de columnas alternativos a los esperados"""
+    column_mapping = {}
+    required_map = {
+        'CODIGO': ['CODIGO', 'CÓDIGO', 'COD', 'MODELO', 'SKU', 'Producto', 'Código', 'codigo'],
+        'ORIGEN': ['ORIGEN', 'FUENTE', 'SOURCE', 'PROCEDENCIA', 'Origen', 'origen'],
+        'Stock': ['Stock', 'STOCK', 'INVENTARIO', 'INVENTORY', 'EXISTENCIAS', 'stock'],
+        'RES_IVN': ['RES_IVN', 'RESERVAS_IVN', 'IVN_RES', 'RESERVA_IVN', 'res_ivn'],
+        'RES_TRANS': ['RES_TRANS', 'RESERVAS_TRANS', 'TRANS_RES', 'RESERVA_TRANS', 'res_trans']
+    }
+    
+    missing_cols = []
+    for expected_col, possible_names in required_map.items():
+        found = False
+        for possible in possible_names:
+            if possible in df.columns:
+                column_mapping[expected_col] = possible
+                found = True
+                st.sidebar.success(f"✅ '{possible}' → '{expected_col}'")
+                break
+        
+        if not found:
+            missing_cols.append(expected_col)
+            st.sidebar.error(f"❌ No se encontró: {expected_col}")
+    
+    return column_mapping, missing_cols
+
+# Aplicar mapeo
+column_mapping, missing_cols = map_column_names(df)
+
+if missing_cols:
+    st.error(f"⚠️ Faltan columnas requeridas: {', '.join(missing_cols)}")
+    
+    # Mostrar ayuda detallada
+    st.info("""
+    **📋 Solución:**
+    
+    1. **Verifica el archivo CSV fuente:** Asegúrate de que contenga columnas con estos nombres (o similares):
+       - `CODIGO` o `MODELO` o `CÓDIGO`
+       - `ORIGEN` o `FUENTE` 
+       - `Stock` o `STOCK` o `INVENTARIO`
+       - `RES_IVN` o `RESERVAS_IVN`
+       - `RES_TRANS` o `RESERVAS_TRANS`
+    
+    2. **Columnas actuales en tu archivo:**
+    """)
+    st.dataframe(pd.DataFrame({"Columnas Actuales": df.columns.tolist()}))
+    
+    st.info("""
+    3. **Si los nombres son diferentes:** 
+       - Modifica el mapeo en el código 
+       - O renombra las columnas en tu CSV
+       - O actualiza los datos en la fuente
+    """)
+    st.stop()
+
+# Renombrar columnas
+df = df.rename(columns=column_mapping)
+st.sidebar.success("✅ Todas las columnas requeridas están disponibles")
+
 if df_colores is not None:
     st.sidebar.success("✅ Datos de colores cargados")
 else:
     st.sidebar.warning("⚠️ No se pudieron cargar los datos de colores")
-
-st.sidebar.success("✅ Datos cargados exitosamente")
-
-# --- Validación de columnas requeridas ---
-required_cols = ['CODIGO', 'ORIGEN', 'Stock', 'RES_IVN', 'RES_TRANS']
-missing_cols = [col for col in required_cols if col not in df.columns]
-if missing_cols:
-    st.error(f"⚠️ Faltan columnas requeridas: {', '.join(missing_cols)}")
-    st.stop()
 
 # --- Columnas de fechas ---
 date_cols = [c for c in df.columns if re.match(r'^\d{4}-\d{2}-\d{2}$', str(c))]
@@ -350,6 +400,14 @@ if df_colores is not None:
     st.markdown("---")
     st.title("🎨 Análisis de Velocidad de Venta por Color")
     
+    # Mapeo de columnas para datos de colores si es necesario
+    if 'MODELO' not in df_colores.columns:
+        # Intentar encontrar la columna equivalente
+        for col in ['MODELO', 'CODIGO', 'CÓDIGO', 'COD', 'Producto']:
+            if col in df_colores.columns:
+                df_colores = df_colores.rename(columns={col: 'MODELO'})
+                break
+    
     # Filtrar datos del producto seleccionado
     df_colores_prod = df_colores[df_colores['MODELO'] == sel].copy()
     
@@ -363,7 +421,7 @@ if df_colores is not None:
         rangos_existentes = [r for r in rangos_dias if r in df_colores_prod.columns]
         
         if not rangos_existentes:
-            st.warning("⚠️ No se encontraron columnas de rangos de días en el archivo")
+            st.warning("⚠️ No se encontraron columnas de rangos de días en el archivo de colores")
         else:
             # Resumen general
             st.subheader(f"📊 Resumen de ventas por color - {sel}")
