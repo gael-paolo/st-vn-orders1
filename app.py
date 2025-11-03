@@ -18,11 +18,7 @@ def load_data_from_url(url, descripcion="archivo"):
         # Hacer request con timeout
         response = requests.get(url, timeout=30)
         response.raise_for_status()
-        
-        # Verificar content-type
-        content_type = response.headers.get('content-type', '')
-        st.success(f"✅ Respuesta recibida - Content-Type: {content_type}")
-        
+                
         # Intentar parsear CSV
         df = pd.read_csv(io.StringIO(response.text))
         
@@ -210,10 +206,7 @@ def map_column_names(df):
                 column_mapping[expected_col] = possible
                 found = True
                 break
-        
-        if not found:
-            st.sidebar.info(f"ℹ️ Columna opcional '{expected_col}' no encontrada (se usará 0)")
-    
+            
     return column_mapping, missing_cols
 
 # Aplicar mapeo
@@ -252,7 +245,6 @@ columnas_opcionales = ['RES_IVN', 'RES_TRANS', 'RES_PED']
 for col in columnas_opcionales:
     if col not in df.columns:
         df[col] = 0
-        st.sidebar.info(f"➕ Columna '{col}' creada con valor 0")
 
 st.sidebar.success("✅ Todas las columnas requeridas están disponibles")
 
