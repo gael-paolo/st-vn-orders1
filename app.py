@@ -183,15 +183,24 @@ st.sidebar.write(f"Total de columnas cargadas: {len(df.columns)}")
 def map_column_names(df):
     """Mapea nombres de columnas alternativos a los esperados"""
     column_mapping = {}
+    
+    # Columnas OBLIGATORIAS
     required_map = {
         'CODIGO': ['CODIGO', 'CÓDIGO', 'COD', 'MODELO', 'SKU', 'Producto', 'Código', 'codigo'],
         'ORIGEN': ['ORIGEN', 'FUENTE', 'SOURCE', 'PROCEDENCIA', 'Origen', 'origen'],
-        'Stock': ['Stock', 'STOCK', 'INVENTARIO', 'INVENTORY', 'EXISTENCIAS', 'stock'],
+        'Stock': ['Stock', 'STOCK', 'INVENTARIO', 'INVENTORY', 'EXISTENCIAS', 'stock']
+    }
+    
+    # Columnas OPCIONALES (pueden o no estar)
+    optional_map = {
         'RES_IVN': ['RES_IVN', 'RESERVAS_IVN', 'IVN_RES', 'RESERVA_IVN', 'res_ivn'],
-        'RES_TRANS': ['RES_TRANS', 'RESERVAS_TRANS', 'TRANS_RES', 'RESERVA_TRANS', 'res_trans']
+        'RES_TRANS': ['RES_TRANS', 'RESERVAS_TRANS', 'TRANS_RES', 'RESERVA_TRANS', 'res_trans'],
+        'RES_PED': ['RES_PED', 'RESERVAS_PED', 'PED_RES', 'RESERVA_PED', 'res_ped']
     }
     
     missing_cols = []
+    
+    # Procesar columnas obligatorias
     for expected_col, possible_names in required_map.items():
         found = False
         for possible in possible_names:
@@ -204,6 +213,19 @@ def map_column_names(df):
         if not found:
             missing_cols.append(expected_col)
             st.sidebar.error(f"❌ No se encontró: {expected_col}")
+    
+    # Procesar columnas opcionales (no generan error si faltan)
+    for expected_col, possible_names in optional_map.items():
+        found = False
+        for possible in possible_names:
+            if possible in df.columns:
+                column_mapping[expected_col] = possible
+                found = True
+                st.sidebar.success(f"✅ '{possible}' → '{expected_col}' (opcional)")
+                break
+        
+        if not found:
+            st.sidebar.info(f"ℹ️ Columna opcional '{expected_col}' no encontrada (se usará 0)")
     
     return column_mapping, missing_cols
 
@@ -237,6 +259,14 @@ if missing_cols:
 
 # Renombrar columnas
 df = df.rename(columns=column_mapping)
+
+# Crear columnas opcionales con valor 0 si no existen
+columnas_opcionales = ['RES_IVN', 'RES_TRANS', 'RES_PED']
+for col in columnas_opcionales:
+    if col not in df.columns:
+        df[col] = 0
+        st.sidebar.info(f"➕ Columna '{col}' creada con valor 0")
+
 st.sidebar.success("✅ Todas las columnas requeridas están disponibles")
 
 if df_colores is not None:
@@ -282,7 +312,15 @@ df['Stock_Seguridad'] = np.where(
 
 df['Total_Pedidos'] = df.filter(like='Ped').fillna(0).sum(axis=1)
 df['Total_Transito'] = df.filter(like='Trans').fillna(0).sum(axis=1)
-df['Total_Reservas'] = df['RES_IVN'].fillna(0) + df['RES_TRANS'].fillna(0)
+
+# Total de reservas considerando las columnas que existan
+df['Total_Reservas'] = 0
+if 'RES_IVN' in df.columns:
+    df['Total_Reservas'] += df['RES_IVN'].fillna(0)
+if 'RES_TRANS' in df.columns:
+    df['Total_Reservas'] += df['RES_TRANS'].fillna(0)
+if 'RES_PED' in df.columns:
+    df['Total_Reservas'] += df['RES_PED'].fillna(0)
 
 df['Stock_Disponible'] = (
     df['Stock'].fillna(0) + 
@@ -391,18 +429,30 @@ with col2:
 st.subheader("📦 Inventario Detallado")
 cols_inv = st.columns(4)
 cols_names = ['Stock', 'Pedidos', 'Tránsito', 'Reservas']
+
+# Definir columnas para cada categoría
 cols_data = [
     ['Stock'], 
     [c for c in df.columns if re.match(r'^Ped', c)],
     [c for c in df.columns if re.match(r'^Trans', c)], 
-    ['RES_IVN', 'RES_TRANS']
+    []  # Reservas se construyen dinámicamente
 ]
+
+# Agregar columnas de reservas que existan
+reservas_cols = []
+for res_col in ['RES_IVN', 'RES_TRANS', 'RES_PED']:
+    if res_col in df.columns:
+        reservas_cols.append(res_col)
+cols_data[3] = reservas_cols
+
 for col_name, col, data_cols in zip(cols_names, cols_inv, cols_data):
     with col:
         st.write(f"**{col_name}**")
         available_cols = [c for c in data_cols if c in df.columns]
         if available_cols:
             st.dataframe(prod[available_cols])
+        else:
+            st.info(f"No hay datos de {col_name}")
 
 # --- Totales ---
 tot_cols = st.columns(5)
