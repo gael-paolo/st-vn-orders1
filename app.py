@@ -11,24 +11,24 @@ st.set_page_config(page_title="🚗 Análisis de Aprovisionamiento de Vehículos
 st.title("🚗 Análisis de Aprovisionamiento de Vehículos Nissan")
 
 # --- Configuración de URLs públicas CON DIAGNÓSTICO MEJORADO ---
-@st.cache_data(ttl=3600) # Cache por 1 hora
+@st.cache_data(ttl=3600)  # Cache por 1 hora
 def load_data_from_url(url, descripcion="archivo"):
 
-    try:        
+    try:
         # Hacer request con timeout
         response = requests.get(url, timeout=30)
         response.raise_for_status()
-                
+
         # Intentar parsear CSV
         df = pd.read_csv(io.StringIO(response.text))
-        
+
         return df
-        
+
     except requests.exceptions.Timeout:
         st.error(f"⏱️ **Timeout** al cargar {descripcion} desde {url}")
         st.error("El servidor tardó más de 30 segundos en responder.")
         return None
-        
+
     except requests.exceptions.HTTPError as e:
         st.error(f"❌ **Error HTTP {e.response.status_code}** al cargar {descripcion}")
         if e.response.status_code == 403:
@@ -46,70 +46,16 @@ def load_data_from_url(url, descripcion="archivo"):
             st.error("📂 **Archivo No Encontrado (404)**")
             st.info("Verifica que la URL sea correcta y que el archivo exista en el bucket.")
         return None
-        
+
     except pd.errors.ParserError as e:
         st.error(f"📄 **Error al parsear CSV**: {str(e)}")
         st.info("El archivo descargado no tiene formato CSV válido.")
         return None
-        
+
     except Exception as e:
         st.error(f"❌ **Error inesperado**: {type(e).__name__}")
         st.error(f"Detalles: {str(e)}")
         return None
-
-# --- DIAGNÓSTICO DE CONEXIÓN (OPCIONAL) ---
-if st.sidebar.checkbox("🔧 Modo Diagnóstico Avanzado"):
-    st.subheader("🔍 Diagnóstico de Conexión al Bucket")
-    
-    try:
-        url_orders = st.secrets["URL_ORDERS"]
-        url_colors = st.secrets["URL_COLORS"]
-                
-        # Test de conexión detallado
-        st.write("### 🔌 Test de Conexión")
-        for name, url in [("Orders", url_orders), ("Colors", url_colors)]:
-            with st.expander(f"Probando {name}..."):
-                try:
-                    # HEAD request primero (más rápido)
-                    st.write("**1. Verificando accesibilidad...**")
-                    response_head = requests.head(url, timeout=10)
-                    st.success(f"✅ Status Code: {response_head.status_code}")
-                    st.write(f"- Content-Type: `{response_head.headers.get('content-type', 'N/A')}`")
-                    st.write(f"- Content-Length: `{response_head.headers.get('content-length', 'N/A')}` bytes")
-                    
-                    # GET request para ver contenido
-                    st.write("**2. Descargando primeras líneas...**")
-                    response_get = requests.get(url, timeout=10)
-                    primeras_lineas = response_get.text[:500]
-                    st.code(primeras_lineas, language="text")
-                    
-                    st.success(f"✅ {name} es accesible y descargable")
-                    
-                except requests.exceptions.RequestException as e:
-                    st.error(f"❌ Error al conectar: {str(e)}")
-                    
-        st.write("---")
-                    
-    except KeyError as e:
-        st.error(f"❌ **Falta configurar secret**: {str(e)}")
-        st.info("""
-        **Configura los secrets en Streamlit Cloud:**
-        
-        1. Ve a tu app en Streamlit Cloud
-        2. Settings → Secrets
-        3. Agrega:
-        ```toml
-        URL_ORDERS = "[https://storage.googleapis.com/](https://storage.googleapis.com/)..."
-        URL_COLORS = "[https://storage.googleapis.com/](https://storage.googleapis.com/)..."
-        ```
-        
-        **Para desarrollo local**, crea `.streamlit/secrets.toml`:
-        ```toml
-        URL_ORDERS = "[https://storage.googleapis.com/](https://storage.googleapis.com/)..."
-        URL_COLORS = "[https://storage.googleapis.com/](https://storage.googleapis.com/)..."
-        ```
-        """)
-        st.stop()
 
 # --- Usuario ---
 usuario = st.sidebar.text_input("Nombre de usuario", value="Usuario")
@@ -147,20 +93,10 @@ if df is None:
     st.info(f"**URL configurada:** {URL_ORDERS}")
     st.info("""
     **Pasos para solucionar:**
-    
     1. **Verifica que la URL sea correcta**
-       - Formato: `https://storage.googleapis.com/BUCKET_NAME/path/file.csv`
-    
-    2. **Haz el archivo público en GCP:**
-       ```bash
-       gsutil iam ch allUsers:objectViewer gs://TU_BUCKET/archivo.csv
-       ```
-    
+    2. **Haz el archivo público en GCP**
     3. **Prueba la URL en tu navegador**
-       - Debe descargar el CSV directamente sin pedir login
-    
-    4. **Verifica el formato del archivo**
-       - Debe ser CSV válido con encabezados
+    4. **Verifica el formato del archivo (CSV válido)**
     """)
     st.stop()
 
@@ -198,7 +134,7 @@ def map_column_names(df):
             missing_cols.append(expected_col)
             st.sidebar.error(f"❌ No se encontró: {expected_col}")
     
-    # Procesar columnas opcionales (no generan error si faltan)
+    # Procesar columnas opcionales
     for expected_col, possible_names in optional_map.items():
         found = False
         for possible in possible_names:
@@ -214,26 +150,6 @@ column_mapping, missing_cols = map_column_names(df)
 
 if missing_cols:
     st.error(f"⚠️ Faltan columnas requeridas: {', '.join(missing_cols)}")
-    
-    st.info("""
-    **📋 Solución:**
-    
-    1. **Verifica el archivo CSV fuente:** Asegúrate de que contenga columnas con estos nombres (o similares):
-       - `CODIGO` o `MODELO` o `CÓDIGO`
-       - `ORIGEN` o `FUENTE` 
-       - `Stock` o `STOCK` o `INVENTARIO`
-       - `RES_IVN` o `RESERVAS_IVN`
-       - `RES_TRANS` o `RESERVAS_TRANS`
-    
-    2. **Columnas actuales en tu archivo:**
-    """)
-    st.dataframe(pd.DataFrame({"Columnas Actuales": df.columns.tolist()}))
-    
-    st.info("""
-    3. **Si los nombres son diferentes:**        - Modifica el mapeo en el código 
-       - O renombra las columnas en tu CSV
-       - O actualiza los datos en la fuente
-    """)
     st.stop()
 
 # Renombrar columnas
@@ -291,7 +207,7 @@ df['Stock_Seguridad'] = np.where(
 df['Total_Pedidos'] = df.filter(like='Ped').fillna(0).sum(axis=1)
 df['Total_Transito'] = df.filter(like='Trans').fillna(0).sum(axis=1)
 
-# Total de reservas considerando las columnas que existan
+# Total de reservas
 df['Total_Reservas'] = 0
 if 'RES_IVN' in df.columns:
     df['Total_Reservas'] += df['RES_IVN'].fillna(0)
@@ -322,17 +238,22 @@ sel = st.selectbox("Selecciona un producto", productos)
 prod = df[df['CODIGO']==sel].iloc[0]
 lead_time = int(prod['Lead_Time'])
 
-# --- Inicialización de inputs ---
+# ----------------------------------------------------------------------
+# --- INICIALIZACIÓN DE INPUTS (AJUSTADA PARA EL BOTÓN GUARDAR) ---
+# ----------------------------------------------------------------------
 if 'UserInputs' not in st.session_state:
     st.session_state['UserInputs'] = {}
-# **SUGERENCIA 1: Inicialización con 0. Usamos el 0 internamente para que number_input funcione.**
-# La diferenciación con "NO REVISADO" se hace en la función de exportación.
+
+# Si el producto actual no existe en la sesión, lo inicializamos con valores por defecto.
+# NO estableceremos 'GUARDADO: True' por defecto.
 if sel not in st.session_state['UserInputs']:
     hist_mean = int(prod[date_cols].mean()) if not np.isnan(prod[date_cols].mean()) else 0
     st.session_state['UserInputs'][sel] = {
         'Proyecciones': [hist_mean]*12, 
         'Pedidos': [0]*4, 
-        'MOS': [2.0]*4
+        'MOS': [2.0]*4,
+        # Nueva bandera: False por defecto
+        'GUARDADO': False 
     }
 
 # --- Gráfico histórico + proyección ---
@@ -361,18 +282,22 @@ st.subheader("✍️ Ventas proyectadas (12 meses)")
 cols_proj = st.columns(4)
 for i in range(12):
     with cols_proj[i%4]:
+        # Usamos el valor directamente del session_state para que el input refleje los cambios guardados
         val = st.number_input(
             f'Mes {i+1}', 
             min_value=0, 
             step=1, 
             value=int(st.session_state['UserInputs'][sel]['Proyecciones'][i]), 
+            # Es vital usar un key único por input. El botón Guardar leerá este key.
             key=f'proj_{sel}_{i}'
         )
-        st.session_state['UserInputs'][sel]['Proyecciones'][i] = val
+        # Ya no se reasigna aquí. La reasignación la hace el botón 'Guardar Registros'.
 
-# --- Métricas del producto ---
+# --- Métricas del producto (resto del código igual) ---
 st.subheader(f"📊 Métricas del producto {sel}")
 col1, col2 = st.columns(2)
+# ... (restante código de métricas, igual) ...
+
 with col1:
     st.metric("Media de ventas", f"{prod['Media']:.2f}")
     st.metric("Coef. Variación", f"{prod['Coef_Variacion']*100:.2f}%")
@@ -405,20 +330,18 @@ with col2:
     st.metric("Stock de seguridad", f"{prod['Stock_Seguridad']:.0f}")
     st.metric("Stock Disponible", f"{prod['Stock_Disponible']:.0f}")
 
-# --- Inventario Detallado ---
+# --- Inventario Detallado (resto del código igual) ---
 st.subheader("📦 Inventario Detallado")
 cols_inv = st.columns(4)
 cols_names = ['Stock', 'Pedidos', 'Tránsito', 'Reservas']
 
-# Definir columnas para cada categoría
 cols_data = [
     ['Stock'], 
     [c for c in df.columns if re.match(r'^Ped', c)],
     [c for c in df.columns if re.match(r'^Trans', c)], 
-    []  # Reservas se construyen dinámicamente
+    []
 ]
 
-# Agregar columnas de reservas que existan
 reservas_cols = []
 for res_col in ['RES_IVN', 'RES_TRANS', 'RES_PED']:
     if res_col in df.columns:
@@ -442,7 +365,7 @@ tot_cols[2].metric("Total Tránsito", f"{prod['Total_Transito']:.0f}")
 tot_cols[3].metric("Total Reservas", f"{prod['Total_Reservas']:.0f}")
 tot_cols[4].metric("Stock Disponible", f"{prod['Stock_Disponible']:.0f}")
 
-# --- ALERTAS ---
+# --- ALERTAS (resto del código igual) ---
 st.subheader("⚠️ Alertas de Inventario")
 alert_col1, alert_col2, alert_col3 = st.columns(3)
 
@@ -482,42 +405,36 @@ for j in range(4):
     with orden_cols[j]:
         st.markdown(f"### 📅 Mes {j+1}")
         
+        # MOS input
         MOS_val = st.number_input(
             f'MOS objetivo', 
             min_value=1.0, 
             max_value=12.0, 
             step=0.1, 
             value=st.session_state['UserInputs'][sel]['MOS'][j], 
-            key=f'MOS_{sel}_{j}'
+            key=f'MOS_{sel}_{j}' # Key único
         )
-        st.session_state['UserInputs'][sel]['MOS'][j] = MOS_val
-
-        demanda_lead_time = sum(st.session_state['UserInputs'][sel]['Proyecciones'][j:min(j+lead_time, 12)])
         
+        # Sugerencias (la lógica se mantiene)
+        demanda_lead_time = sum(st.session_state['UserInputs'][sel]['Proyecciones'][j:min(j+lead_time, 12)])
         mos_sug = max(MOS_val * prod['Media_Safe'] - stock_proj, 0)
         dem_sug = max(demanda_lead_time - stock_proj, 0)
         ss_sug = max(prod['Stock_Seguridad'] - stock_proj, 0)
-
-        sugerencias = [mos_sug, dem_sug, ss_sug]
-        max_sug = max(sugerencias)
-        min_sug = min(sugerencias)
-        if max_sug > 0 and (max_sug - min_sug) / max_sug > 0.5:
-            st.warning("⚠️ Sugerencias divergentes")
 
         st.metric("💡 Sugerida MOS", f"{mos_sug:.0f}")
         st.metric("📊 Sugerida Demanda", f"{dem_sug:.0f}")
         st.metric("🛡️ Sugerida SS", f"{ss_sug:.0f}")
 
+        # Pedido input
         plan_val = st.number_input(
             f'✏️ Orden a colocar', 
             min_value=0, 
             step=1, 
-            # Usamos el valor guardado, que es 0 por defecto si no ha sido modificado
             value=int(st.session_state['UserInputs'][sel]['Pedidos'][j]), 
-            key=f'order_{sel}_{j}'
+            key=f'order_{sel}_{j}' # Key único
         )
-        st.session_state['UserInputs'][sel]['Pedidos'][j] = plan_val
-
+        
+        # Cálculo de stock proyectado
         demanda_mes_actual = st.session_state['UserInputs'][sel]['Proyecciones'][j] if j < 12 else 0
         stock_proj = stock_proj + plan_val - demanda_mes_actual
         
@@ -528,9 +445,45 @@ for j in range(4):
         else:
             st.success(f"✅ Stock proyectado: **{stock_proj:.0f}**")
 
-# --- ANÁLISIS DE COLORES ---
+
+# ----------------------------------------------------------------------
+# --- NUEVA SECCIÓN: BOTÓN GUARDAR REGISTROS ---
+# ----------------------------------------------------------------------
+st.markdown("---")
+st.subheader("✍️ Confirmación de Aprovisionamiento")
+col_save, col_status = st.columns([1, 2])
+
+with col_save:
+    if st.button("💾 Guardar Registros", type="primary"):
+        
+        # Sincronizar todos los inputs del producto actual con la sesión antes de guardar
+        # 1. Proyecciones (12 meses)
+        for i in range(12):
+            st.session_state['UserInputs'][sel]['Proyecciones'][i] = st.session_state[f'proj_{sel}_{i}']
+            
+        # 2. Pedidos y MOS (4 meses)
+        for j in range(4):
+            st.session_state['UserInputs'][sel]['Pedidos'][j] = st.session_state[f'order_{sel}_{j}']
+            st.session_state['UserInputs'][sel]['MOS'][j] = st.session_state[f'MOS_{sel}_{j}']
+            
+        # 3. Marcar como GUARDADO
+        st.session_state['UserInputs'][sel]['GUARDADO'] = True
+        
+        st.toast(f"✅ Registros guardados para **{sel}** por {usuario}!", icon='💾')
+        st.rerun() # Necesario para actualizar el estado visual de "Guardado"
+
+# 4. Mostrar el estado de guardado
+with col_status:
+    estado = st.session_state['UserInputs'].get(sel, {}).get('GUARDADO', False)
+    if estado:
+        st.success(f"✅ Estado: **GUARDADO** (Exportable)")
+    else:
+        st.warning(f"⚠️ Estado: **PENDIENTE DE GUARDAR** (Se exportará como 'NO REVISADO')")
+
+st.markdown("---")
+
+# --- ANÁLISIS DE COLORES (se mantiene igual) ---
 if df_colores is not None:
-    st.markdown("---")
     st.title("🎨 Análisis de Velocidad de Venta por Color")
     
     if 'MODELO' not in df_colores.columns:
@@ -543,8 +496,8 @@ if df_colores is not None:
     
     if len(df_colores_prod) > 0:
         rangos_dias = ['0-29', '30-59', '60-89', '90-119', '120-149', '150-179', 
-                       '180-209', '210-239', '240-269', '270-299', '300-329', 
-                       '330-359', '360-389', '390-419', '420-449', 'Mayor a 450']
+                        '180-209', '210-239', '240-269', '270-299', '300-329', 
+                        '330-359', '360-389', '390-419', '420-449', 'Mayor a 450']
         
         rangos_existentes = [r for r in rangos_dias if r in df_colores_prod.columns]
         
@@ -705,28 +658,30 @@ if df_colores is not None:
 else:
     st.info("💡 No se cargaron datos de colores")
 
-# --- Exportar datos ---
+# ----------------------------------------------------------------------
+# --- EXPORTAR DATOS (LÓGICA ACTUALIZADA CON BANDERA 'GUARDADO') ---
+# ----------------------------------------------------------------------
 st.subheader("📥 Descargar datos ingresados")
 
-# **SUGERENCIA 2: LÓGICA DE EXPORTACIÓN MODIFICADA**
 def generar_excel():
-    """Genera archivo Excel con los datos ingresados y marca como 'NO REVISADO' los productos no manipulados."""
+    """Genera archivo Excel usando la bandera 'GUARDADO'."""
     try:
         all_data = []
         fecha_export = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # Obtener todos los productos de la familia actualmente seleccionada
         df_familia = df[df['FAMILIA']==selected_fam].copy()
         productos_familia = df_familia['CODIGO'].unique().tolist()
 
-        # Iterar sobre TODOS los productos de la familia, NO solo los del session_state
         for prod_name in productos_familia:
             
-            es_manipulado = prod_name in st.session_state['UserInputs']
+            prod_data = st.session_state['UserInputs'].get(prod_name)
             
-            # --- Proyecciones (Solo se exportan si fueron manipuladas) ---
-            if es_manipulado:
-                vals = st.session_state['UserInputs'][prod_name]
+            # Condición clave: Solo se considera guardado si tiene GUARDADO=True
+            es_guardado = prod_data is not None and prod_data.get('GUARDADO', False)
+            
+            # --- Proyecciones (Solo se exportan si fue guardado) ---
+            if es_guardado:
+                vals = prod_data
                 proy_dates = pd.date_range(start=datetime.today(), periods=12, freq='MS')
                 for i, v in enumerate(vals['Proyecciones']):
                     all_data.append({
@@ -744,11 +699,12 @@ def generar_excel():
             
             for j in range(4):
                 
-                if es_manipulado:
-                    pedido_val = int(st.session_state['UserInputs'][prod_name]['Pedidos'][j])
-                    mos_val = st.session_state['UserInputs'][prod_name]['MOS'][j]
+                if es_guardado:
+                    # El producto fue guardado, exportamos el valor numérico (0 o >0)
+                    pedido_val = int(prod_data['Pedidos'][j])
+                    mos_val = prod_data['MOS'][j]
                 else:
-                    # Asignamos el valor indicador si no fue revisado
+                    # El producto no fue guardado, exportamos la etiqueta
                     pedido_val = 'NO REVISADO'
                     mos_val = 'NO REVISADO'
                 
@@ -769,13 +725,11 @@ def generar_excel():
             export_df.to_excel(writer, index=False, sheet_name='Datos_Ingresados')
             
             worksheet = writer.sheets['Datos_Ingresados']
-            
             for column in worksheet.columns:
                 max_length = 0
                 column_letter = column[0].column_letter
                 for cell in column:
                     try:
-                        # Ajuste para manejar el valor no numérico 'NO REVISADO'
                         value_to_check = str(cell.value) if cell.value is not None else ''
                         if len(value_to_check) > max_length:
                             max_length = len(value_to_check)
