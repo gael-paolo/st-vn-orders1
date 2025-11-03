@@ -10,25 +10,138 @@ import requests
 st.set_page_config(page_title="🚗 Análisis de Aprovisionamiento de Vehículos Nissan", layout="wide")
 st.title("🚗 Análisis de Aprovisionamiento de Vehículos Nissan")
 
-# --- Configuración de URLs públicas ---
+# --- Configuración de URLs públicas CON DIAGNÓSTICO MEJORADO ---
 @st.cache_data(ttl=3600)  # Cache por 1 hora
-def load_data_from_url(url):
-    """Carga datos desde una URL pública"""
+def load_data_from_url(url, descripcion="archivo"):
+    """Carga datos desde una URL pública con diagnóstico detallado"""
     try:
-        response = requests.get(url)
-        response.raise_for_status()  # Lanza error si la respuesta no es 200
+        st.info(f"🔄 Cargando {descripcion} desde: {url[:50]}...")
+        
+        # Hacer request con timeout
+        response = requests.get(url, timeout=30)
+        response.raise_for_status()
+        
+        # Verificar content-type
+        content_type = response.headers.get('content-type', '')
+        st.success(f"✅ Respuesta recibida - Content-Type: {content_type}")
+        
+        # Intentar parsear CSV
         df = pd.read_csv(io.StringIO(response.text))
+        st.success(f"✅ {descripcion.capitalize()} cargado: {len(df)} filas, {len(df.columns)} columnas")
+        
         return df
-    except Exception as e:
-        st.error(f"Error al cargar datos desde {url}: {str(e)}")
+        
+    except requests.exceptions.Timeout:
+        st.error(f"⏱️ **Timeout** al cargar {descripcion} desde {url}")
+        st.error("El servidor tardó más de 30 segundos en responder.")
         return None
+        
+    except requests.exceptions.HTTPError as e:
+        st.error(f"❌ **Error HTTP {e.response.status_code}** al cargar {descripcion}")
+        if e.response.status_code == 403:
+            st.error("🔒 **Acceso Denegado (403)**")
+            st.info("""
+            **Soluciones:**
+            1. Verifica que el archivo sea público en Google Cloud Storage
+            2. Comando para hacer público:
+            ```bash
+            gsutil iam ch allUsers:objectViewer gs://TU_BUCKET/archivo.csv
+            ```
+            3. O desde la consola web: Bucket → archivo → Permisos → Agregar → allUsers → Storage Object Viewer
+            """)
+        elif e.response.status_code == 404:
+            st.error("📂 **Archivo No Encontrado (404)**")
+            st.info("Verifica que la URL sea correcta y que el archivo exista en el bucket.")
+        return None
+        
+    except pd.errors.ParserError as e:
+        st.error(f"📄 **Error al parsear CSV**: {str(e)}")
+        st.info("El archivo descargado no tiene formato CSV válido.")
+        return None
+        
+    except Exception as e:
+        st.error(f"❌ **Error inesperado**: {type(e).__name__}")
+        st.error(f"Detalles: {str(e)}")
+        return None
+
+# --- DIAGNÓSTICO DE CONEXIÓN (OPCIONAL) ---
+if st.sidebar.checkbox("🔧 Modo Diagnóstico Avanzado"):
+    st.subheader("🔍 Diagnóstico de Conexión al Bucket")
+    
+    try:
+        url_orders = st.secrets["URL_ORDERS"]
+        url_colors = st.secrets["URL_COLORS"]
+        
+        st.write("### 📋 URLs Configuradas")
+        st.code(f"Orders: {url_orders}", language="text")
+        st.code(f"Colors: {url_colors}", language="text")
+        
+        # Test de conexión detallado
+        st.write("### 🔌 Test de Conexión")
+        for name, url in [("Orders", url_orders), ("Colors", url_colors)]:
+            with st.expander(f"Probando {name}..."):
+                try:
+                    # HEAD request primero (más rápido)
+                    st.write("**1. Verificando accesibilidad...**")
+                    response_head = requests.head(url, timeout=10)
+                    st.success(f"✅ Status Code: {response_head.status_code}")
+                    st.write(f"- Content-Type: `{response_head.headers.get('content-type', 'N/A')}`")
+                    st.write(f"- Content-Length: `{response_head.headers.get('content-length', 'N/A')}` bytes")
+                    
+                    # GET request para ver contenido
+                    st.write("**2. Descargando primeras líneas...**")
+                    response_get = requests.get(url, timeout=10)
+                    primeras_lineas = response_get.text[:500]
+                    st.code(primeras_lineas, language="text")
+                    
+                    st.success(f"✅ {name} es accesible y descargable")
+                    
+                except requests.exceptions.RequestException as e:
+                    st.error(f"❌ Error al conectar: {str(e)}")
+                    
+        st.write("---")
+                    
+    except KeyError as e:
+        st.error(f"❌ **Falta configurar secret**: {str(e)}")
+        st.info("""
+        **Configura los secrets en Streamlit Cloud:**
+        
+        1. Ve a tu app en Streamlit Cloud
+        2. Settings → Secrets
+        3. Agrega:
+        ```toml
+        URL_ORDERS = "https://storage.googleapis.com/..."
+        URL_COLORS = "https://storage.googleapis.com/..."
+        ```
+        
+        **Para desarrollo local**, crea `.streamlit/secrets.toml`:
+        ```toml
+        URL_ORDERS = "https://storage.googleapis.com/..."
+        URL_COLORS = "https://storage.googleapis.com/..."
+        ```
+        """)
+        st.stop()
 
 # --- Usuario ---
 usuario = st.sidebar.text_input("Nombre de usuario", value="Usuario")
 
-# --- Configuración de URLs (las pondremos en secrets) ---
-URL_ORDERS = st.secrets["URL_ORDERS"]
-URL_COLORS = st.secrets["URL_COLORS"]
+# --- Verificar que existen los secrets ---
+try:
+    URL_ORDERS = st.secrets["URL_ORDERS"]
+    URL_COLORS = st.secrets["URL_COLORS"]
+except KeyError as e:
+    st.error(f"❌ **Error de configuración**: Falta el secret {str(e)}")
+    st.info("""
+    **Configura los secrets:**
+    
+    En Streamlit Cloud: Settings → Secrets
+    
+    ```toml
+    URL_ORDERS = "https://storage.googleapis.com/tu-bucket/orders.csv"
+    URL_COLORS = "https://storage.googleapis.com/tu-bucket/colors.csv"
+    ```
+    """)
+    st.stop()
 
 # Botón de recarga en sidebar
 if st.sidebar.button("🔄 Recargar datos"):
@@ -36,22 +149,29 @@ if st.sidebar.button("🔄 Recargar datos"):
     st.rerun()
 
 # --- Carga de datos desde URLs públicas ---
-with st.spinner("📥 Cargando datos desde URLs públicas..."):
-    df = load_data_from_url(URL_ORDERS)
-    df_colores = load_data_from_url(URL_COLORS)
+with st.spinner("📥 Cargando datos desde Google Cloud Storage..."):
+    df = load_data_from_url(URL_ORDERS, "órdenes")
+    df_colores = load_data_from_url(URL_COLORS, "colores")
 
 if df is None:
     st.error("❌ No se pudo cargar el archivo de órdenes.")
-    st.info(f"**URL usada:** {URL_ORDERS}")
+    st.info(f"**URL configurada:** {URL_ORDERS}")
     st.info("""
-    **Solución:**
-    1. Verifica que el archivo CSV esté público en Google Cloud Storage
-    2. Asegúrate de que la URL sea correcta
-    3. Puedes configurar las URLs en Streamlit Secrets:
-    ```toml
-    url_orders = "https://storage.googleapis.com/tu-bucket/tu-archivo-orders.csv"
-    url_colors = "https://storage.googleapis.com/tu-bucket/tu-archivo-colors.csv"
-    ```
+    **Pasos para solucionar:**
+    
+    1. **Verifica que la URL sea correcta**
+       - Formato: `https://storage.googleapis.com/BUCKET_NAME/path/file.csv`
+    
+    2. **Haz el archivo público en GCP:**
+       ```bash
+       gsutil iam ch allUsers:objectViewer gs://TU_BUCKET/archivo.csv
+       ```
+    
+    3. **Prueba la URL en tu navegador**
+       - Debe descargar el CSV directamente sin pedir login
+    
+    4. **Verifica el formato del archivo**
+       - Debe ser CSV válido con encabezados
     """)
     st.stop()
 
@@ -93,7 +213,6 @@ column_mapping, missing_cols = map_column_names(df)
 if missing_cols:
     st.error(f"⚠️ Faltan columnas requeridas: {', '.join(missing_cols)}")
     
-    # Mostrar ayuda detallada
     st.info("""
     **📋 Solución:**
     
@@ -145,31 +264,26 @@ z_dict = {80:0.84,85:1.04,90:1.28,95:1.65,97.5:1.96,99:2.33}
 z = z_dict[nivel_servicio]
 
 # --- Métricas base con protección matemática ---
-# Calcular media con mínimo para evitar división por cero
 df['Media'] = df[date_cols].mean(axis=1)
-df['Media_Safe'] = df['Media'].clip(lower=0.01)  # Mínimo de 0.01 para cálculos
+df['Media_Safe'] = df['Media'].clip(lower=0.01)
 
-# Coeficiente de variación protegido
 df['Desviacion'] = df[date_cols].std(axis=1)
 df['Coef_Variacion'] = np.where(
     df['Media'] > 0.01,
     df['Desviacion'] / df['Media'],
-    0  # Si no hay ventas, CV = 0
+    0
 )
 
-# Stock de seguridad mejorado
 df['Stock_Seguridad'] = np.where(
     (df['Media'] > 0.01) & (df['Desviacion'] > 0),
     z * df['Desviacion'] * np.sqrt(df['Lead_Time']),
-    0  # Si no hay variabilidad o ventas, SS = 0
+    0
 )
 
-# Totales con manejo de NaN - CORREGIDO
 df['Total_Pedidos'] = df.filter(like='Ped').fillna(0).sum(axis=1)
 df['Total_Transito'] = df.filter(like='Trans').fillna(0).sum(axis=1)
 df['Total_Reservas'] = df['RES_IVN'].fillna(0) + df['RES_TRANS'].fillna(0)
 
-# Stock Disponible CORREGIDO: Stock + Tránsito + Pedidos - Reservas
 df['Stock_Disponible'] = (
     df['Stock'].fillna(0) + 
     df['Total_Transito'].fillna(0) + 
@@ -177,11 +291,10 @@ df['Stock_Disponible'] = (
     df['Total_Reservas'].fillna(0)
 )
 
-# Meses de inventario protegido
 df['Meses_Inventario'] = np.where(
     df['Media'] > 0.01, 
     df['Stock_Disponible'] / df['Media'], 
-    999  # Valor alto si no hay ventas
+    999
 )
 
 # --- Selección de familia y producto ---
@@ -239,14 +352,13 @@ for i in range(12):
         )
         st.session_state['UserInputs'][sel]['Proyecciones'][i] = val
 
-# --- Métricas del producto con colores y barras ---
+# --- Métricas del producto ---
 st.subheader(f"📊 Métricas del producto {sel}")
 col1, col2 = st.columns(2)
 with col1:
     st.metric("Media de ventas", f"{prod['Media']:.2f}")
     st.metric("Coef. Variación", f"{prod['Coef_Variacion']*100:.2f}%")
     
-    # Verificar si existen las columnas de movimientos antes de mostrarlas
     if 'Movimientos_4_Meses' in prod:
         st.write(f"Movimientos 4 meses: {prod['Movimientos_4_Meses']}")
         st.progress(min(prod['Movimientos_4_Meses']/12, 1.0))
@@ -259,7 +371,6 @@ with col2:
         st.write(f"Movimientos 12 meses: {prod['Movimientos_12_Meses']}")
         st.progress(min(prod['Movimientos_12_Meses']/12, 1.0))
     
-    # Verificar si existen las columnas de tendencia y estratificación
     if 'Tendencia' in prod:
         tend_color = {'++':'green', '+':'lightgreen', '0':'gray', '-':'red', '--':'darkred'}
         st.markdown(
@@ -293,7 +404,7 @@ for col_name, col, data_cols in zip(cols_names, cols_inv, cols_data):
         if available_cols:
             st.dataframe(prod[available_cols])
 
-# --- Totales grandes repartidos ---
+# --- Totales ---
 tot_cols = st.columns(5)
 tot_cols[0].metric("Total Stock", f"{prod['Stock']:.0f}")
 tot_cols[1].metric("Total Pedido", f"{prod['Total_Pedidos']:.0f}")
@@ -301,7 +412,7 @@ tot_cols[2].metric("Total Tránsito", f"{prod['Total_Transito']:.0f}")
 tot_cols[3].metric("Total Reservas", f"{prod['Total_Reservas']:.0f}")
 tot_cols[4].metric("Stock Disponible", f"{prod['Stock_Disponible']:.0f}")
 
-# --- ALERTAS VISUALES ---
+# --- ALERTAS ---
 st.subheader("⚠️ Alertas de Inventario")
 alert_col1, alert_col2, alert_col3 = st.columns(3)
 
@@ -316,34 +427,31 @@ with alert_col1:
 with alert_col2:
     meses_inv = prod['Meses_Inventario']
     if meses_inv < 1:
-        st.error(f"🚨 Menos de 1 mes de inventario: {meses_inv:.1f} meses")
+        st.error(f"🚨 Menos de 1 mes: {meses_inv:.1f} meses")
     elif meses_inv > 6:
         st.warning(f"⚠️ Sobreinventario: {meses_inv:.1f} meses")
     else:
-        st.success(f"✅ Cobertura adecuada: {meses_inv:.1f} meses")
+        st.success(f"✅ Cobertura: {meses_inv:.1f} meses")
 
 with alert_col3:
     if prod['Coef_Variacion'] > 1.0:
         st.warning(f"⚠️ Alta variabilidad: CV={prod['Coef_Variacion']*100:.0f}%")
     elif prod['Media'] < 0.1:
-        st.info("ℹ️ Producto de baja rotación")
+        st.info("ℹ️ Baja rotación")
     else:
         st.success("✅ Variabilidad normal")
 
-# --- Órdenes planificadas y sugeridas ---
+# --- Órdenes planificadas ---
 st.subheader("✍️ Órdenes planificadas y sugeridas (4 meses)")
-st.info(f"ℹ️ Lead Time del producto: {lead_time} meses")
+st.info(f"ℹ️ Lead Time: {lead_time} meses")
 
 orden_cols = st.columns(4)
-
-# Inicializar stock proyectado correctamente con pedidos existentes
 stock_proj = prod['Stock_Disponible']
 
 for j in range(4):
     with orden_cols[j]:
         st.markdown(f"### 📅 Mes {j+1}")
         
-        # MOS esperado editable por mes
         MOS_val = st.number_input(
             f'MOS objetivo', 
             min_value=1.0, 
@@ -354,26 +462,22 @@ for j in range(4):
         )
         st.session_state['UserInputs'][sel]['MOS'][j] = MOS_val
 
-        # Sugerencias dinámicas
         demanda_lead_time = sum(st.session_state['UserInputs'][sel]['Proyecciones'][j:min(j+lead_time, 12)])
         
         mos_sug = max(MOS_val * prod['Media_Safe'] - stock_proj, 0)
         dem_sug = max(demanda_lead_time - stock_proj, 0)
         ss_sug = max(prod['Stock_Seguridad'] - stock_proj, 0)
 
-        # Alertas si las sugerencias difieren mucho
         sugerencias = [mos_sug, dem_sug, ss_sug]
         max_sug = max(sugerencias)
         min_sug = min(sugerencias)
         if max_sug > 0 and (max_sug - min_sug) / max_sug > 0.5:
             st.warning("⚠️ Sugerencias divergentes")
 
-        # Mostrar métricas grandes
-        st.metric("💡 Sugerida MOS", f"{mos_sug:.0f}", help="Orden sugerida según MOS")
-        st.metric("📊 Sugerida Demanda", f"{dem_sug:.0f}", help=f"Orden según demanda proyectada (LT: {lead_time} meses)")
-        st.metric("🛡️ Sugerida SS", f"{ss_sug:.0f}", help="Orden sugerida según stock de seguridad")
+        st.metric("💡 Sugerida MOS", f"{mos_sug:.0f}")
+        st.metric("📊 Sugerida Demanda", f"{dem_sug:.0f}")
+        st.metric("🛡️ Sugerida SS", f"{ss_sug:.0f}")
 
-        # Selector de orden
         plan_val = st.number_input(
             f'✏️ Orden a colocar', 
             min_value=0, 
@@ -383,11 +487,9 @@ for j in range(4):
         )
         st.session_state['UserInputs'][sel]['Pedidos'][j] = plan_val
 
-        # Actualizar stock proyectado CORRECTAMENTE
         demanda_mes_actual = st.session_state['UserInputs'][sel]['Proyecciones'][j] if j < 12 else 0
         stock_proj = stock_proj + plan_val - demanda_mes_actual
         
-        # Mostrar stock proyectado con alerta
         if stock_proj < 0:
             st.error(f"🚨 Stock proyectado: **{stock_proj:.0f}**")
         elif stock_proj < prod['Stock_Seguridad']:
@@ -400,92 +502,77 @@ if df_colores is not None:
     st.markdown("---")
     st.title("🎨 Análisis de Velocidad de Venta por Color")
     
-    # Mapeo de columnas para datos de colores si es necesario
     if 'MODELO' not in df_colores.columns:
-        # Intentar encontrar la columna equivalente
         for col in ['MODELO', 'CODIGO', 'CÓDIGO', 'COD', 'Producto']:
             if col in df_colores.columns:
                 df_colores = df_colores.rename(columns={col: 'MODELO'})
                 break
     
-    # Filtrar datos del producto seleccionado
     df_colores_prod = df_colores[df_colores['MODELO'] == sel].copy()
     
     if len(df_colores_prod) > 0:
-        # Definir rangos de días
         rangos_dias = ['0-29', '30-59', '60-89', '90-119', '120-149', '150-179', 
                        '180-209', '210-239', '240-269', '270-299', '300-329', 
                        '330-359', '360-389', '390-419', '420-449', 'Mayor a 450']
         
-        # Verificar qué columnas de rangos existen
         rangos_existentes = [r for r in rangos_dias if r in df_colores_prod.columns]
         
         if not rangos_existentes:
-            st.warning("⚠️ No se encontraron columnas de rangos de días en el archivo de colores")
+            st.warning("⚠️ No se encontraron columnas de rangos")
         else:
-            # Resumen general
-            st.subheader(f"📊 Resumen de ventas por color - {sel}")
+            st.subheader(f"📊 Resumen - {sel}")
             
             col_summary1, col_summary2, col_summary3 = st.columns(3)
             
             total_ventas = df_colores_prod['Total'].sum() if 'Total' in df_colores_prod.columns else 0
             num_colores = len(df_colores_prod)
-            ventas_rapidas = df_colores_prod[rangos_existentes[:3]].sum().sum()  # 0-89 días
-            ventas_lentas = df_colores_prod[rangos_existentes[-3:]].sum().sum() if len(rangos_existentes) >= 3 else 0  # Últimos 3 rangos
+            ventas_rapidas = df_colores_prod[rangos_existentes[:3]].sum().sum()
+            ventas_lentas = df_colores_prod[rangos_existentes[-3:]].sum().sum() if len(rangos_existentes) >= 3 else 0
             
             with col_summary1:
-                st.metric("Total de ventas", f"{total_ventas:.0f}")
+                st.metric("Total ventas", f"{total_ventas:.0f}")
             with col_summary2:
-                st.metric("Colores disponibles", num_colores)
+                st.metric("Colores", num_colores)
             with col_summary3:
                 pct_rapidas = (ventas_rapidas / total_ventas * 100) if total_ventas > 0 else 0
-                st.metric("Ventas rápidas (0-89 días)", f"{pct_rapidas:.1f}%")
+                st.metric("Ventas rápidas (0-89)", f"{pct_rapidas:.1f}%")
             
-            # Gráfico de barras apiladas por color
-            st.subheader("📈 Distribución de velocidad de venta por color")
+            st.subheader("📈 Distribución por color")
             
-            # Preparar datos para el gráfico
             df_plot = df_colores_prod[['Sig. Color'] + rangos_existentes].set_index('Sig. Color')
             
-            # Crear gráfico de barras apiladas horizontal
             fig_colores = px.bar(
                 df_plot.T,
                 orientation='h',
-                title=f"Días hasta la venta por color - {sel}",
-                labels={'value': 'Cantidad de vehículos', 'index': 'Rango de días'},
+                title=f"Días hasta venta - {sel}",
+                labels={'value': 'Vehículos', 'index': 'Rango días'},
                 color_discrete_sequence=px.colors.sequential.Viridis
             )
             fig_colores.update_layout(
-                xaxis_title="Cantidad de vehículos",
-                yaxis_title="Rango de días hasta la venta",
+                xaxis_title="Cantidad",
+                yaxis_title="Rango días",
                 legend_title="Color",
-                height=500,
-                showlegend=True
+                height=500
             )
             st.plotly_chart(fig_colores, use_container_width=True)
             
-            # Tabla detallada con formato condicional
             st.subheader("📋 Detalle por color")
             
-            # Calcular métricas adicionales por color
             df_colores_prod['Ventas_Rapidas_0-89'] = df_colores_prod[rangos_existentes[:3]].sum(axis=1)
-            df_colores_prod['Ventas_Medias_90-269'] = df_colores_prod[[r for r in rangos_existentes if '90' in r or '120' in r or '150' in r or '180' in r or '210' in r or '240' in r]].sum(axis=1) if len(rangos_existentes) > 3 else 0
-            df_colores_prod['Ventas_Lentas_270+'] = df_colores_prod[[r for r in rangos_existentes if '270' in r or '300' in r or '330' in r or '360' in r or '390' in r or '420' in r or 'Mayor' in r]].sum(axis=1)
+            df_colores_prod['Ventas_Medias_90-269'] = df_colores_prod[[r for r in rangos_existentes if any(x in r for x in ['90','120','150','180','210','240'])]].sum(axis=1)
+            df_colores_prod['Ventas_Lentas_270+'] = df_colores_prod[[r for r in rangos_existentes if any(x in r for x in ['270','300','330','360','390','420','Mayor'])]].sum(axis=1)
             
-            # Calcular porcentajes
             df_colores_prod['% Rápidas'] = (df_colores_prod['Ventas_Rapidas_0-89'] / df_colores_prod['Total'] * 100).fillna(0)
             df_colores_prod['% Lentas'] = (df_colores_prod['Ventas_Lentas_270+'] / df_colores_prod['Total'] * 100).fillna(0)
             
-            # Calcular días promedio ponderado (aproximado)
             dias_promedio = []
             for idx, row in df_colores_prod.iterrows():
                 total = 0
                 suma_ponderada = 0
                 for i, rango in enumerate(rangos_existentes):
                     if rango == 'Mayor a 450':
-                        dias_medio = 480  # Asumimos 480 días
+                        dias_medio = 480
                     else:
-                        # Extraer el punto medio del rango
                         numeros = [int(n) for n in rango.split('-')]
                         dias_medio = sum(numeros) / len(numeros)
                     
@@ -498,10 +585,8 @@ if df_colores is not None:
             
             df_colores_prod['Días_Promedio_Venta'] = dias_promedio
             
-            # Ordenar por días promedio (más rápidos primero)
             df_colores_prod_sorted = df_colores_prod.sort_values('Días_Promedio_Venta')
             
-            # Mostrar tabla resumen
             tabla_resumen = df_colores_prod_sorted[[
                 'Sig. Color', 
                 'Total', 
@@ -513,12 +598,10 @@ if df_colores is not None:
                 'Días_Promedio_Venta'
             ]].copy()
             
-            # Formatear columnas
             tabla_resumen['% Rápidas'] = tabla_resumen['% Rápidas'].apply(lambda x: f"{x:.1f}%")
             tabla_resumen['% Lentas'] = tabla_resumen['% Lentas'].apply(lambda x: f"{x:.1f}%")
             tabla_resumen['Días_Promedio_Venta'] = tabla_resumen['Días_Promedio_Venta'].apply(lambda x: f"{x:.0f}")
             
-            # Renombrar columnas
             tabla_resumen.columns = [
                 'Color', 
                 'Total Ventas', 
@@ -532,7 +615,6 @@ if df_colores is not None:
             
             st.dataframe(tabla_resumen, use_container_width=True, hide_index=True)
             
-            # Recomendaciones basadas en el análisis
             st.subheader("💡 Recomendaciones")
             
             mejor_color = df_colores_prod_sorted.iloc[0]
@@ -542,21 +624,19 @@ if df_colores is not None:
             
             with col_rec1:
                 st.success(f"**✅ Color más rápido:** {mejor_color['Sig. Color']}")
-                st.write(f"- Días promedio de venta: {mejor_color['Días_Promedio_Venta']:.0f}")
-                st.write(f"- {mejor_color['% Rápidas']:.1f}% vendidos en menos de 90 días")
-                st.write("🎯 **Acción:** Priorizar este color en órdenes futuras")
+                st.write(f"- Días promedio: {mejor_color['Días_Promedio_Venta']:.0f}")
+                st.write(f"- {mejor_color['% Rápidas']:.1f}% en < 90 días")
+                st.write("🎯 **Acción:** Priorizar en órdenes")
             
             with col_rec2:
                 st.warning(f"**⚠️ Color más lento:** {peor_color['Sig. Color']}")
-                st.write(f"- Días promedio de venta: {peor_color['Días_Promedio_Venta']:.0f}")
-                st.write(f"- {peor_color['% Lentas']:.1f}% vendidos después de 270 días")
-                st.write("🎯 **Acción:** Reducir inventario de este color")
+                st.write(f"- Días promedio: {peor_color['Días_Promedio_Venta']:.0f}")
+                st.write(f"- {peor_color['% Lentas']:.1f}% después de 270 días")
+                st.write("🎯 **Acción:** Reducir inventario")
             
-            # Gráfico de pastel de distribución
             col_pie1, col_pie2 = st.columns(2)
             
             with col_pie1:
-                # Distribución por velocidad
                 dist_velocidad = pd.DataFrame({
                     'Categoría': ['Rápidas (0-89)', 'Medias (90-269)', 'Lentas (270+)'],
                     'Cantidad': [
@@ -569,7 +649,7 @@ if df_colores is not None:
                     dist_velocidad, 
                     values='Cantidad', 
                     names='Categoría',
-                    title='Distribución por velocidad de venta',
+                    title='Distribución por velocidad',
                     color='Categoría',
                     color_discrete_map={
                         'Rápidas (0-89)': 'green',
@@ -580,22 +660,21 @@ if df_colores is not None:
                 st.plotly_chart(fig_pie_vel, use_container_width=True)
             
             with col_pie2:
-                # Top 5 colores por volumen
                 top_colores = df_colores_prod_sorted.nlargest(5, 'Total')[['Sig. Color', 'Total']]
                 fig_pie_top = px.pie(
                     top_colores,
                     values='Total',
                     names='Sig. Color',
-                    title='Top 5 colores por volumen de ventas'
+                    title='Top 5 colores por volumen'
                 )
                 st.plotly_chart(fig_pie_top, use_container_width=True)
     
     else:
-        st.info(f"ℹ️ No hay datos de colores para el producto {sel}")
+        st.info(f"ℹ️ No hay datos de colores para {sel}")
 else:
     st.info("💡 No se cargaron datos de colores")
 
-# --- Exportar datos ingresados ---
+# --- Exportar datos ---
 st.subheader("📥 Descargar datos ingresados")
 
 def generar_excel():
@@ -608,7 +687,6 @@ def generar_excel():
             proy_dates = pd.date_range(start=datetime.today(), periods=12, freq='MS')
             order_dates = pd.date_range(start=datetime.today(), periods=4, freq='MS')
             
-            # Proyecciones
             for i, v in enumerate(vals['Proyecciones']):
                 all_data.append({
                     'Producto': prod_name,
@@ -620,7 +698,6 @@ def generar_excel():
                     'Fecha_Exportacion': fecha_export
                 })
             
-            # Pedidos
             for j, v in enumerate(vals['Pedidos']):
                 all_data.append({
                     'Producto': prod_name,
@@ -634,15 +711,12 @@ def generar_excel():
         
         export_df = pd.DataFrame(all_data)
         
-        # Crear archivo Excel en memoria
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             export_df.to_excel(writer, index=False, sheet_name='Datos_Ingresados')
             
-            # Acceder a la hoja para dar formato
             worksheet = writer.sheets['Datos_Ingresados']
             
-            # Ajustar ancho de columnas
             for column in worksheet.columns:
                 max_length = 0
                 column_letter = column[0].column_letter
@@ -658,21 +732,19 @@ def generar_excel():
         return output.getvalue()
     
     except Exception as e:
-        st.error(f"Error al generar el archivo: {str(e)}")
+        st.error(f"Error al generar archivo: {str(e)}")
         return None
 
-# Botón de descarga
 excel_data = generar_excel()
 if excel_data:
     st.download_button(
-        label="📥 Descargar Orden Generada (.xlsx)",
+        label="📥 Descargar Orden (.xlsx)",
         data=excel_data,
         file_name=f"Nissan_Order_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 else:
-    st.error("No se pudo generar el archivo de exportación")
+    st.error("No se pudo generar archivo")
 
-# --- Footer con información ---
 st.markdown("---")
-st.caption(f"Usuario: {usuario} | Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"👤 {usuario} | 📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
