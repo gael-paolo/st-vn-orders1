@@ -72,8 +72,8 @@ except KeyError as e:
     En Streamlit Cloud: Settings → Secrets
     
     ```toml
-    URL_ORDERS = "[https://storage.googleapis.com/tu-bucket/orders.csv](https://storage.googleapis.com/tu-bucket/orders.csv)"
-    URL_COLORS = "[https://storage.googleapis.com/tu-bucket/colors.csv](https://storage.googleapis.com/tu-bucket/colors.csv)"
+    URL_ORDERS = "https://storage.googleapis.com/tu-bucket/orders.csv"
+    URL_COLORS = "https://storage.googleapis.com/tu-bucket/colors.csv"
     ```
     """)
     st.stop()
@@ -229,11 +229,24 @@ df['Meses_Inventario'] = np.where(
     999
 )
 
-# --- Selección de familia y producto ---
+# --- Selección de familia, estratificación y producto ---
 df['FAMILIA'] = df['CODIGO'].str[:3]
 familias = sorted(df['FAMILIA'].unique().tolist())
 selected_fam = st.sidebar.selectbox("Selecciona familia", familias)
-productos = sorted(df[df['FAMILIA']==selected_fam]['CODIGO'].unique().tolist())
+
+# NUEVO: selector ESTRAT bajo familia (sidebar)
+estrats = sorted(df[df['FAMILIA']==selected_fam]['ESTRAT'].dropna().unique().tolist())
+# Si no hay ESTRAT, ponemos una opción por defecto
+if not estrats:
+    estrats = ['SIN ESTRAT']
+selected_estrat = st.sidebar.selectbox("Selecciona estratificación (ESTRAT)", estrats)
+
+# Filtrar productos por familia + estrat
+productos = sorted(df[(df['FAMILIA']==selected_fam) & (df['ESTRAT']==selected_estrat)]['CODIGO'].unique().tolist())
+if not productos:
+    st.warning("No se encontraron productos para la combinación Familia / Estratificación seleccionada.")
+    st.stop()
+
 sel = st.selectbox("Selecciona un producto", productos)
 prod = df[df['CODIGO']==sel].iloc[0]
 lead_time = int(prod['Lead_Time'])
@@ -244,54 +257,78 @@ lead_time = int(prod['Lead_Time'])
 if 'UserInputs' not in st.session_state:
     st.session_state['UserInputs'] = {}
 
-# Si el producto actual no existe en la sesión, lo inicializamos con valores por defecto.
-# NO estableceremos 'GUARDADO: True' por defecto.
+# Inicialización por producto si no existe
 if sel not in st.session_state['UserInputs']:
     hist_mean = int(prod[date_cols].mean()) if not np.isnan(prod[date_cols].mean()) else 0
     st.session_state['UserInputs'][sel] = {
         'Proyecciones': [hist_mean]*12, 
         'Pedidos': [0]*4, 
         'MOS': [2.0]*4,
-        # Nueva bandera: False por defecto
         'GUARDADO': False 
     }
 
-# --- Gráfico histórico + proyección ---
+# Asegurar espacio para figuras y control de proyecciones por producto
+fig_key = f"fig_{sel}"
+last_proj_key = f"last_proj_{sel}"
+if fig_key not in st.session_state:
+    st.session_state[fig_key] = None
+if last_proj_key not in st.session_state:
+    st.session_state[last_proj_key] = None
+
+# --- Gráfico histórico + proyección (se genera de forma eficiente) ---
 hist = prod[date_cols].T.reset_index()
 hist.columns = ['Fecha','Ventas']
 hist['Fecha'] = pd.to_datetime(hist['Fecha'])
 proy_fechas = pd.date_range(start=hist['Fecha'].max() + pd.offsets.MonthBegin(), periods=12, freq='MS')
-proy = pd.DataFrame({
-    'Fecha': proy_fechas, 
-    'Proyección': st.session_state['UserInputs'][sel]['Proyecciones']
-})
 
-fig = px.line()
-fig.add_scatter(x=hist['Fecha'], y=hist['Ventas'], mode='lines+markers', name='Histórico', line=dict(color='blue'))
-fig.add_scatter(x=proy['Fecha'], y=proy['Proyección'], mode='lines+markers', name='Proyección', line=dict(color='orange', dash='dash'))
-fig.update_layout(
-    title=f"Serie de tiempo: {sel}", 
-    xaxis_title="Mes", 
-    yaxis_title="Unidades",
-    hovermode='x unified'
-)
-st.plotly_chart(fig, use_container_width=True)
+# Función pequeña para crear figura
+def crear_figura(prod_codigo):
+    prod_row = df[df['CODIGO']==prod_codigo].iloc[0]
+    hist_local = prod_row[date_cols].T.reset_index()
+    hist_local.columns = ['Fecha','Ventas']
+    hist_local['Fecha'] = pd.to_datetime(hist_local['Fecha'])
+    proj_vals = st.session_state['UserInputs'][prod_codigo]['Proyecciones']
+    proy_dates_local = pd.date_range(start=hist_local['Fecha'].max() + pd.offsets.MonthBegin(), periods=len(proj_vals), freq='MS')
+    fig_local = px.line()
+    fig_local.add_scatter(x=hist_local['Fecha'], y=hist_local['Ventas'], mode='lines+markers', name='Histórico', line=dict(color='blue'))
+    fig_local.add_scatter(x=proy_dates_local, y=proj_vals, mode='lines+markers', name='Proyección', line=dict(color='orange', dash='dash'))
+    fig_local.update_layout(title=f"Serie de tiempo: {prod_codigo}", xaxis_title="Mes", yaxis_title="Unidades", hovermode='x unified', height=420)
+    return fig_local
 
-# --- Ventas proyectadas ---
+# Si las proyecciones cambiaron o no hay figura guardada, generamos
+current_proy = list(st.session_state['UserInputs'][sel]['Proyecciones'])
+if st.session_state[last_proj_key] != current_proy or st.session_state[fig_key] is None:
+    st.session_state[fig_key] = crear_figura(sel)
+    st.session_state[last_proj_key] = current_proy
+
+# Mostrar figura guardada
+st.plotly_chart(st.session_state[fig_key], use_container_width=True)
+
+# --- Ventas proyectadas con inputs (12 meses) y botón de actualizar proyección ---
 st.subheader("✍️ Ventas proyectadas (12 meses)")
 cols_proj = st.columns(4)
 for i in range(12):
     with cols_proj[i%4]:
-        # Usamos el valor directamente del session_state para que el input refleje los cambios guardados
+        # Key único por producto y mes
+        key_name = f'proj_{sel}_{i}'
+        value_current = int(st.session_state['UserInputs'][sel]['Proyecciones'][i])
         val = st.number_input(
             f'Mes {i+1}', 
             min_value=0, 
             step=1, 
-            value=int(st.session_state['UserInputs'][sel]['Proyecciones'][i]), 
-            # Es vital usar un key único por input. El botón Guardar leerá este key.
-            key=f'proj_{sel}_{i}'
+            value=value_current, 
+            key=key_name
         )
-        # Ya no se reasigna aquí. La reasignación la hace el botón 'Guardar Registros'.
+        # actualizar el session_state de proyecciones en caliente para que el botón use los valores nuevos
+        st.session_state['UserInputs'][sel]['Proyecciones'][i] = val
+
+# Botón que regenera la figura y la guarda en session_state para respuesta rápida
+if st.button("🔁 Actualizar proyección"):
+    # regenerar figura con las proyecciones actuales
+    st.session_state[fig_key] = crear_figura(sel)
+    st.session_state[last_proj_key] = list(st.session_state['UserInputs'][sel]['Proyecciones'])
+    st.toast("📈 Gráfico de proyección actualizado", icon="🔁")
+    st.rerun()
 
 # --- Métricas del producto (resto del código igual) ---
 st.subheader(f"📊 Métricas del producto {sel}")
@@ -690,7 +727,7 @@ def generar_excel():
             prod_data = st.session_state['UserInputs'].get(prod_name)
             es_guardado = prod_data is not None and prod_data.get('GUARDADO', False)
 
-            # --- Proyecciones (solo si fue guardado) ---
+            # --- Proyecciones (Solo se exportan si fue guardado) ---
             if es_guardado:
                 vals = prod_data
                 proy_dates = pd.date_range(start=datetime.today(), periods=12, freq='MS')
@@ -705,16 +742,20 @@ def generar_excel():
                         'Fecha_Exportacion': fecha_export
                     })
 
-            # --- Pedidos (exportar solo guardados, o todos si ninguno lo está) ---
+            # --- Pedidos (Aprovisionamiento) ---
             order_dates = pd.date_range(start=datetime.today(), periods=4, freq='MS')
+            
             for j in range(4):
+                
                 if es_guardado:
+                    # El producto fue guardado, exportamos el valor numérico (0 o >0)
                     pedido_val = int(prod_data['Pedidos'][j])
                     mos_val = prod_data['MOS'][j]
                 else:
+                    # El producto no fue guardado, exportamos la etiqueta
                     pedido_val = 'NO REVISADO'
                     mos_val = 'NO REVISADO'
-
+                
                 all_data.append({
                     'Producto': prod_name,
                     'Tipo': 'Pedido',
@@ -724,13 +765,13 @@ def generar_excel():
                     'Usuario': usuario,
                     'Fecha_Exportacion': fecha_export
                 })
-
+        
         export_df = pd.DataFrame(all_data)
-
+        
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             export_df.to_excel(writer, index=False, sheet_name='Datos_Ingresados')
-
+            
             worksheet = writer.sheets['Datos_Ingresados']
             for column in worksheet.columns:
                 max_length = 0
@@ -744,9 +785,9 @@ def generar_excel():
                         pass
                 adjusted_width = min(max_length + 2, 50)
                 worksheet.column_dimensions[column_letter].width = adjusted_width
-
+        
         return output.getvalue()
-
+    
     except Exception as e:
         st.error(f"Error al generar archivo: {str(e)}")
         return None
