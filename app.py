@@ -13,10 +13,8 @@ st.title("🚗 Análisis de Aprovisionamiento de Vehículos Nissan")
 # --- Configuración de URLs públicas CON DIAGNÓSTICO MEJORADO ---
 @st.cache_data(ttl=3600)  # Cache por 1 hora
 def load_data_from_url(url, descripcion="archivo"):
-    """Carga datos desde una URL pública con diagnóstico detallado"""
-    try:
-        st.info(f"🔄 Cargando {descripcion} desde: {url[:50]}...")
-        
+
+    try:        
         # Hacer request con timeout
         response = requests.get(url, timeout=30)
         response.raise_for_status()
@@ -27,7 +25,6 @@ def load_data_from_url(url, descripcion="archivo"):
         
         # Intentar parsear CSV
         df = pd.read_csv(io.StringIO(response.text))
-        st.success(f"✅ {descripcion.capitalize()} cargado: {len(df)} filas, {len(df.columns)} columnas")
         
         return df
         
@@ -71,11 +68,7 @@ if st.sidebar.checkbox("🔧 Modo Diagnóstico Avanzado"):
     try:
         url_orders = st.secrets["URL_ORDERS"]
         url_colors = st.secrets["URL_COLORS"]
-        
-        st.write("### 📋 URLs Configuradas")
-        st.code(f"Orders: {url_orders}", language="text")
-        st.code(f"Colors: {url_colors}", language="text")
-        
+                
         # Test de conexión detallado
         st.write("### 🔌 Test de Conexión")
         for name, url in [("Orders", url_orders), ("Colors", url_colors)]:
@@ -175,10 +168,6 @@ if df is None:
     """)
     st.stop()
 
-# --- DIAGNÓSTICO Y MAPEO DE COLUMNAS ---
-st.sidebar.subheader("🔍 Diagnóstico de Columnas")
-st.sidebar.write(f"Total de columnas cargadas: {len(df.columns)}")
-
 # --- Mapeo flexible de columnas ---
 def map_column_names(df):
     """Mapea nombres de columnas alternativos a los esperados"""
@@ -207,7 +196,6 @@ def map_column_names(df):
             if possible in df.columns:
                 column_mapping[expected_col] = possible
                 found = True
-                st.sidebar.success(f"✅ '{possible}' → '{expected_col}'")
                 break
         
         if not found:
@@ -221,7 +209,6 @@ def map_column_names(df):
             if possible in df.columns:
                 column_mapping[expected_col] = possible
                 found = True
-                st.sidebar.success(f"✅ '{possible}' → '{expected_col}' (opcional)")
                 break
         
         if not found:
