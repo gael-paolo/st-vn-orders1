@@ -860,18 +860,18 @@ with alert_col3:
 st.subheader("✍️ Órdenes planificadas y sugeridas")
 st.info(f"ℹ️ Lead Time: {lead_time} meses | Nivel de servicio: {nivel_servicio}%")
 
-# Determinar estructura de órdenes según origen
+# Determinar estructura de órdenes según origen - CORREGIDO
 origen_actual = prod['ORIGEN']
-if origen_actual in ['NMEX', 'NTE', 'UK', 'USA', 'NBA']:
-    # n+4: pedidos para meses n+4 a n+7, llegadas n+6 a n+9
+if origen_actual == 'NTJ':
+    # Caso NTJ: Pedidos n+2, Llegada n+5 (Lead Time 3 meses)
     meses_pedido = 4
-    offset_pedido = 4
-    st.success(f"🔷 **Estructura n+4** - Origen: {origen_actual}")
+    offset_pedido = 2  # Pedidos empiezan en n+2 (Enero si planificamos en Noviembre)
+    st.success(f"🔶 **Estructura NTJ** - Pedidos: n+{offset_pedido} | Llegada: n+{offset_pedido + lead_time}")
 else:
-    # n+3: pedidos para meses n+3 a n+6, llegadas n+6 a n+9  
+    # Casos NO NTJ (NMEX, etc.): Pedidos n+4, Llegada n+6 (Lead Time 2 meses)
     meses_pedido = 4
-    offset_pedido = 3
-    st.success(f"🔶 **Estructura n+3** - Origen: {origen_actual}")
+    offset_pedido = 4  # Pedidos empiezan en n+4 (Marzo si planificamos en Noviembre)
+    st.success(f"🔷 **Estructura No-NTJ** - Pedidos: n+{offset_pedido} | Llegada: n+{offset_pedido + lead_time}")
 
 # Fechas para órdenes según estructura dinámica
 ultima_fecha_historica = pd.to_datetime(date_cols[-1])
@@ -888,8 +888,11 @@ for j in range(meses_pedido):
         mes_label = fechas_ordenes[j].strftime('%b %Y')
         st.markdown(f"### 📅 {mes_label}")
         
-        mes_orden = j  # n+3 o n+4, etc.
+        mes_orden = j  # Posición del pedido (0,1,2,3)
         mes_arribo = mes_orden + offset_pedido + lead_time  # Mes real de arribo
+        
+        # Mostrar información de timing
+        st.info(f"**Timing:** Orden n+{offset_pedido + mes_orden} → Llega n+{mes_arribo}")
         
         # --- CÁLCULOS CORREGIDOS SEGÚN ESPECIFICACIONES ---
         
