@@ -856,6 +856,7 @@ with alert_col3:
     else:
         st.success("✅ Variabilidad normal")
 
+
 # --- LÓGICA CORREGIDA para Órdenes Planificadas DINÁMICA SEGÚN ORIGEN ---
 st.subheader("✍️ Órdenes planificadas y sugeridas")
 st.info(f"ℹ️ Lead Time: {lead_time} meses | Nivel de servicio: {nivel_servicio}%")
@@ -873,18 +874,22 @@ else:
     offset_pedido = 4  # Pedidos empiezan en n+4 (Marzo si planificamos en Noviembre)
     st.success(f"🔷 **Estructura No-NTJ** - Pedidos: n+{offset_pedido} | Llegada: n+{offset_pedido + lead_time}")
 
-# Fechas para órdenes según estructura dinámica - CORREGIDO
-ultima_fecha_historica = pd.to_datetime(date_cols[-1])
+# Fechas para órdenes según estructura dinámica - CORRECCIÓN DEFINITIVA
+# Asumimos que la última fecha histórica es Noviembre (mes actual de planificación)
+fecha_planificacion = pd.to_datetime(date_cols[-1])  # Noviembre
 
-# CORRECCIÓN: Usar MonthBegin(1) para empezar desde el primer día del mes siguiente
+# Calcular el mes de inicio basado en el offset
+mes_inicio = fecha_planificacion + pd.DateOffset(months=offset_pedido)
+
+# Crear el rango de fechas para las órdenes
 fechas_ordenes = pd.date_range(
-    start=ultima_fecha_historica + pd.offsets.MonthBegin(offset_pedido), 
+    start=mes_inicio.replace(day=1),  # Primer día del mes
     periods=meses_pedido, 
     freq='MS'
 )
 
 # Mostrar información de timing para debug
-st.info(f"**Fecha base:** {ultima_fecha_historica.strftime('%d-%b-%Y')} | **Primera orden:** {fechas_ordenes[0].strftime('%b %Y')}")
+st.info(f"**Planificación:** {fecha_planificacion.strftime('%b %Y')} | **Primera orden:** {fechas_ordenes[0].strftime('%b %Y')} | **Offset:** {offset_pedido} meses")
 
 orden_cols = st.columns(meses_pedido)
 
@@ -986,6 +991,7 @@ for j in range(meses_pedido):
         
         st.metric("📦 Stock Proy. al Orden", f"{stock_proy_orden:.0f}")
         st.metric("🚚 Stock Proy. al Arribo", f"{stock_proy_arribo:.0f}")
+
 
 # --- Autoguardado periódico ---
 auto_save()
