@@ -856,7 +856,6 @@ with alert_col3:
     else:
         st.success("✅ Variabilidad normal")
 
-
 # --- LÓGICA CORREGIDA para Órdenes Planificadas DINÁMICA SEGÚN ORIGEN ---
 st.subheader("✍️ Órdenes planificadas y sugeridas")
 st.info(f"ℹ️ Lead Time: {lead_time} meses | Nivel de servicio: {nivel_servicio}%")
@@ -875,10 +874,11 @@ else:
     st.success(f"🔷 **Estructura No-NTJ** - Pedidos: n+{offset_pedido} | Llegada: n+{offset_pedido + lead_time}")
 
 # Fechas para órdenes según estructura dinámica - CORRECCIÓN DEFINITIVA
-# Asumimos que la última fecha histórica es Noviembre (mes actual de planificación)
-fecha_planificacion = pd.to_datetime(date_cols[-1])  # Noviembre
+# Última fecha histórica es Octubre (datos de ventas), pero planificamos en Noviembre
+ultima_fecha_ventas = pd.to_datetime(date_cols[-1])  # Octubre
+fecha_planificacion = ultima_fecha_ventas + pd.DateOffset(months=1)  # Noviembre (mes actual de planificación)
 
-# Calcular el mes de inicio basado en el offset
+# Calcular el mes de inicio basado en el offset desde Noviembre
 mes_inicio = fecha_planificacion + pd.DateOffset(months=offset_pedido)
 
 # Crear el rango de fechas para las órdenes
@@ -889,7 +889,7 @@ fechas_ordenes = pd.date_range(
 )
 
 # Mostrar información de timing para debug
-st.info(f"**Planificación:** {fecha_planificacion.strftime('%b %Y')} | **Primera orden:** {fechas_ordenes[0].strftime('%b %Y')} | **Offset:** {offset_pedido} meses")
+st.info(f"**Últimas ventas:** {ultima_fecha_ventas.strftime('%b %Y')} | **Planificación:** {fecha_planificacion.strftime('%b %Y')} | **Primera orden:** {fechas_ordenes[0].strftime('%b %Y')}")
 
 orden_cols = st.columns(meses_pedido)
 
@@ -899,10 +899,12 @@ for j in range(meses_pedido):
         st.markdown(f"### 📅 {mes_label}")
         
         mes_orden = j  # Posición del pedido (0,1,2,3)
-        mes_arribo = offset_pedido + mes_orden + lead_time  # Mes real de arribo desde fecha base
+        mes_arribo = offset_pedido + mes_orden + lead_time  # Mes real de arribo desde fecha de planificación
         
-        # Mostrar información de timing
-        st.info(f"**Timing:** Orden n+{offset_pedido + mes_orden} → Llega n+{mes_arribo}")
+        # Mostrar información de timing específica
+        mes_orden_real = offset_pedido + mes_orden
+        mes_llegada_real = mes_orden_real + lead_time
+        st.info(f"**Timing:** Orden n+{mes_orden_real} → Llega n+{mes_llegada_real}")
         
         # --- CÁLCULOS CORREGIDOS SEGÚN ESPECIFICACIONES ---
         
