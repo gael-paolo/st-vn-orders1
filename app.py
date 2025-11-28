@@ -873,13 +873,18 @@ else:
     offset_pedido = 4  # Pedidos empiezan en n+4 (Marzo si planificamos en Noviembre)
     st.success(f"🔷 **Estructura No-NTJ** - Pedidos: n+{offset_pedido} | Llegada: n+{offset_pedido + lead_time}")
 
-# Fechas para órdenes según estructura dinámica
+# Fechas para órdenes según estructura dinámica - CORREGIDO
 ultima_fecha_historica = pd.to_datetime(date_cols[-1])
+
+# CORRECCIÓN: Usar MonthBegin(1) para empezar desde el primer día del mes siguiente
 fechas_ordenes = pd.date_range(
-    start=ultima_fecha_historica + pd.DateOffset(months=offset_pedido), 
+    start=ultima_fecha_historica + pd.offsets.MonthBegin(offset_pedido), 
     periods=meses_pedido, 
     freq='MS'
 )
+
+# Mostrar información de timing para debug
+st.info(f"**Fecha base:** {ultima_fecha_historica.strftime('%d-%b-%Y')} | **Primera orden:** {fechas_ordenes[0].strftime('%b %Y')}")
 
 orden_cols = st.columns(meses_pedido)
 
@@ -889,7 +894,7 @@ for j in range(meses_pedido):
         st.markdown(f"### 📅 {mes_label}")
         
         mes_orden = j  # Posición del pedido (0,1,2,3)
-        mes_arribo = mes_orden + offset_pedido + lead_time  # Mes real de arribo
+        mes_arribo = offset_pedido + mes_orden + lead_time  # Mes real de arribo desde fecha base
         
         # Mostrar información de timing
         st.info(f"**Timing:** Orden n+{offset_pedido + mes_orden} → Llega n+{mes_arribo}")
@@ -968,8 +973,9 @@ for j in range(meses_pedido):
             user_data['GUARDADO'] = False
         
         # Mostrar stocks proyectados relevantes
-        if mes_orden + offset_pedido < len(stock_proyectado):
-            stock_proy_orden = stock_proyectado[mes_orden + offset_pedido]
+        mes_stock_orden = offset_pedido + mes_orden
+        if mes_stock_orden < len(stock_proyectado):
+            stock_proy_orden = stock_proyectado[mes_stock_orden]
         else:
             stock_proy_orden = 0
             
