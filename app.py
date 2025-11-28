@@ -355,7 +355,13 @@ date_cols = date_cols[-num_months:]
 
 # --- Lead time y nivel de servicio ---
 def get_lead_time(origen):
-    return {'NMEX':2,'NTE':3,'NTJ':4}.get(origen,3)
+    """Define lead time según origen"""
+    lead_times = {
+        'NMEX': 2, 'NTE': 2, 'UK': 2, 'USA': 2, 'NBA': 2,  # n+4 (2 meses después del pedido)
+        'NTJ': 3   # n+3 (3 meses después del pedido)
+    }
+    return lead_times.get(origen, 2)
+
 df['Lead_Time'] = df['ORIGEN'].apply(get_lead_time)
 
 nivel_servicio = st.sidebar.selectbox("Nivel de servicio (%)", options=[80,85,90,95,97.5,99], index=3)
@@ -588,7 +594,7 @@ def calcular_stock_proyectado_corregido(prod_codigo, proyecciones, pedidos_plani
     return stock_proyectado
 
 # --- Visualización principal mejorada ---
-def crear_visualizacion_principal(prod_codigo, proyecciones, pedidos, lead_time):
+def crear_visualizacion_principal(prod_codigo, proyecciones, pedidos, lead_time, current_proy):
     """Crea la visualización principal con stock proyectado corregido"""
     prod_row = df[df['CODIGO'] == prod_codigo].iloc[0]
     
@@ -609,6 +615,23 @@ def crear_visualizacion_principal(prod_codigo, proyecciones, pedidos, lead_time)
     stock_proyectado = calcular_stock_proyectado_corregido(
         prod_codigo, proyecciones, pedidos, lead_time, stock_inicial
     )
+    
+    # Calcular stock de seguridad dinámico basado en proyecciones
+    if len(current_proy) >= 6:
+        # Tomar los últimos 6 meses de proyecciones para calcular variabilidad
+        inicio_ss = max(0, len(current_proy) - 6)
+        periodo_ss = current_proy[inicio_ss:]
+        
+        if len(periodo_ss) > 1:
+            std_dinamico = np.std(periodo_ss)
+        else:
+            std_dinamico = prod_row['Desviacion']
+    else:
+        # Si no hay suficientes proyecciones, usar datos históricos
+        std_dinamico = prod_row['Desviacion']
+    
+    # Stock de seguridad dinámico basado en proyecciones
+    ss_dinamico = z_dict[nivel_servicio] * std_dinamico * np.sqrt(lead_time)
     
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     
@@ -645,12 +668,11 @@ def crear_visualizacion_principal(prod_codigo, proyecciones, pedidos, lead_time)
         secondary_y=True,
     )
     
-    # Línea de stock de seguridad
-    stock_seguridad = prod_row['Stock_Seguridad']
+    # Línea de stock de seguridad DINÁMICO
     fig.add_hline(
-        y=stock_seguridad, line_dash="dot", 
+        y=ss_dinamico, line_dash="dot", 
         line_color="red", opacity=0.7,
-        annotation_text=f"Stock Seguridad: {stock_seguridad:.0f}",
+        annotation_text=f"Stock Seguridad Dinámico: {ss_dinamico:.0f} (σ={std_dinamico:.1f})",
         secondary_y=True
     )
     
@@ -666,13 +688,13 @@ def crear_visualizacion_principal(prod_codigo, proyecciones, pedidos, lead_time)
     fig.update_yaxes(title_text="Ventas (unidades)", secondary_y=False)
     fig.update_yaxes(title_text="Stock Proyectado (unidades)", secondary_y=True)
     
-    return fig, stock_proyectado
+    return fig, stock_proyectado, ss_dinamico
 
 # Generar y mostrar gráfico principal
 current_proy = user_data['Proyecciones']
 current_pedidos = user_data['Pedidos']
 
-fig_principal, stock_proyectado = crear_visualizacion_principal(sel, current_proy, current_pedidos, lead_time)
+fig_principal, stock_proyectado, ss_dinamico = crear_visualizacion_principal(sel, current_proy, current_pedidos, lead_time, current_proy)
 st.plotly_chart(fig_principal, use_container_width=True)
 
 # --- Ventas proyectadas (12 meses) ---
@@ -700,6 +722,17 @@ for col_idx in range(4):
                     user_data['Proyecciones'][i] = val
                     user_data['last_update'] = datetime.now()
                     user_data['GUARDADO'] = False
+
+# --- Botón para actualizar gráfico después de las proyecciones ---
+col_btn_proj = st.columns([1, 2, 1])
+with col_btn_proj[1]:
+    if st.button("🔄 Actualizar Cálculos de Órdenes y Gráfico", type="primary", use_container_width=True):
+        st.session_state.recalculate_orders = True
+        # Recalcular el gráfico con las nuevas proyecciones
+        fig_principal, stock_proyectado, ss_dinamico = crear_visualizacion_principal(
+            sel, user_data['Proyecciones'], current_pedidos, lead_time, user_data['Proyecciones']
+        )
+        st.rerun()
 
 # --- Métricas del producto mejoradas ---
 st.subheader(f"📊 Métricas del producto {sel}")
@@ -823,42 +856,40 @@ with alert_col3:
     else:
         st.success("✅ Variabilidad normal")
 
-# --- LÓGICA CORREGIDA para Órdenes Planificadas CON STOCK DE SEGURIDAD DINÁMICO ---
-st.subheader("✍️ Órdenes planificadas y sugeridas (Meses n+4 a n+7)")
+# --- LÓGICA CORREGIDA para Órdenes Planificadas DINÁMICA SEGÚN ORIGEN ---
+st.subheader("✍️ Órdenes planificadas y sugeridas")
 st.info(f"ℹ️ Lead Time: {lead_time} meses | Nivel de servicio: {nivel_servicio}%")
 
-# Botón para actualizar cálculos de órdenes
-col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
-with col_btn2:
-    if st.button("🔄 Actualizar Cálculos de Órdenes y Gráfico", type="primary", use_container_width=True):
-        st.session_state.recalculate_orders = True
-        st.rerun()
+# Determinar estructura de órdenes según origen
+origen_actual = prod['ORIGEN']
+if origen_actual in ['NMEX', 'NTE', 'UK', 'USA', 'NBA']:
+    # n+4: pedidos para meses n+4 a n+7, llegadas n+6 a n+9
+    meses_pedido = 4
+    offset_pedido = 4
+    st.success(f"🔷 **Estructura n+4** - Origen: {origen_actual}")
+else:
+    # n+3: pedidos para meses n+3 a n+6, llegadas n+6 a n+9  
+    meses_pedido = 4
+    offset_pedido = 3
+    st.success(f"🔶 **Estructura n+3** - Origen: {origen_actual}")
 
-# Si se solicita recálculo, recalcular el stock proyectado
-if st.session_state.recalculate_orders:
-    stock_proyectado = calcular_stock_proyectado_corregido(
-        sel, current_proy, current_pedidos, lead_time, prod['Stock_Disponible']
-    )
-    st.session_state.recalculate_orders = False
-    st.success("✅ Cálculos de órdenes actualizados")
-
-# Fechas para órdenes
+# Fechas para órdenes según estructura dinámica
 ultima_fecha_historica = pd.to_datetime(date_cols[-1])
 fechas_ordenes = pd.date_range(
-    start=ultima_fecha_historica + pd.DateOffset(months=4), 
-    periods=4, 
+    start=ultima_fecha_historica + pd.DateOffset(months=offset_pedido), 
+    periods=meses_pedido, 
     freq='MS'
 )
 
-orden_cols = st.columns(4)
+orden_cols = st.columns(meses_pedido)
 
-for j in range(4):
+for j in range(meses_pedido):
     with orden_cols[j]:
         mes_label = fechas_ordenes[j].strftime('%b %Y')
         st.markdown(f"### 📅 {mes_label}")
         
-        mes_orden = j  # n+4, n+5, n+6, n+7
-        mes_arribo = mes_orden + 4 + lead_time  # Mes real de arribo
+        mes_orden = j  # n+3 o n+4, etc.
+        mes_arribo = mes_orden + offset_pedido + lead_time  # Mes real de arribo
         
         # --- CÁLCULOS CORREGIDOS SEGÚN ESPECIFICACIONES ---
         
@@ -900,34 +931,9 @@ for j in range(4):
             mos_actual_proyectado = 0
             demanda_promedio_6m = 0
         
-        # 2. SUGERIDO POR STOCK DE SEGURIDAD DINÁMICO BASADO EN PROYECCIONES
-        # Usar las proyecciones de ventas para calcular SS dinámico
-        if len(current_proy) >= 6:
-            # Tomar los últimos 6 meses de proyecciones para calcular variabilidad
-            inicio_ss = max(0, len(current_proy) - 6)
-            periodo_ss = current_proy[inicio_ss:]
-            
-            if len(periodo_ss) > 1:
-                std_dinamico = np.std(periodo_ss)
-                media_dinamico = np.mean(periodo_ss)
-            else:
-                std_dinamico = prod['Desviacion']
-                media_dinamico = prod['Media']
-        else:
-            # Si no hay suficientes proyecciones, usar datos históricos
-            std_dinamico = prod['Desviacion']
-            media_dinamico = prod['Media']
-        
-        # Stock de seguridad dinámico basado en proyecciones
-        ss_dinamico = z_dict[nivel_servicio] * std_dinamico * np.sqrt(lead_time)
-        
-        # Stock proyectado al momento de la orden
-        if mes_orden + 4 < len(stock_proyectado):
-            stock_proy_orden = stock_proyectado[mes_orden + 4]
-        else:
-            stock_proy_orden = 0
-            
-        sugerido_ss = max(ss_dinamico - stock_proy_orden, 0)
+        # 2. SUGERIDO POR STOCK DE SEGURIDAD DINÁMICO
+        # Usar SS dinámico calculado en el gráfico
+        sugerido_ss = max(ss_dinamico - stock_proyectado_arribo_sin_pedido, 0) if mes_arribo < len(stock_proyectado) else 0
         
         # Mostrar las dos perspectivas
         st.metric("💡 Sugerido por MOS", f"{sugerido_mos:.0f}")
@@ -937,9 +943,6 @@ for j in range(4):
         if mes_arribo < len(stock_proyectado):
             st.info(f"**MOS actual proyectado:** {mos_actual_proyectado:.1f} meses")
             st.info(f"**Demanda prom. 6m:** {demanda_promedio_6m:.1f}")
-        
-        # Mostrar información del SS dinámico
-        st.info(f"**SS dinámico:** {ss_dinamico:.0f} (σ={std_dinamico:.1f})")
         
         # Input de pedido del usuario
         plan_val = st.number_input(
@@ -962,8 +965,8 @@ for j in range(4):
             user_data['GUARDADO'] = False
         
         # Mostrar stocks proyectados relevantes
-        if mes_orden + 4 < len(stock_proyectado):
-            stock_proy_orden = stock_proyectado[mes_orden + 4]
+        if mes_orden + offset_pedido < len(stock_proyectado):
+            stock_proy_orden = stock_proyectado[mes_orden + offset_pedido]
         else:
             stock_proy_orden = 0
             
