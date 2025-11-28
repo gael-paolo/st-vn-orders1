@@ -197,6 +197,12 @@ def initialize_session_state():
         st.session_state.calculations_cache = {}
     if 'recalculate_orders' not in st.session_state:
         st.session_state.recalculate_orders = False
+    if 'selected_family' not in st.session_state:
+        st.session_state.selected_family = 'Todas'
+    if 'selected_strat' not in st.session_state:
+        st.session_state.selected_strat = 'Todas'
+    if 'product_key' not in st.session_state:
+        st.session_state.product_key = 0
 
 initialize_session_state()
 
@@ -215,14 +221,16 @@ GCP_ORDERS_PATH = "nissan/orders/vn_nissan_order.csv"
 GCP_COLORS_PATH = "nissan/orders/vn_nissan_colors.csv"
 
 # URLs de respaldo (por si falla la carga desde GCP)
-URL_ORDERS = st.secrets["URL_ORDERS"]
-URL_COLORS = st.secrets["URL_COLORS"]
+URL_ORDERS = "https://storage.googleapis.com/bk_vn/nissan/orders/vn_nissan_order.csv"
+URL_COLORS = "https://storage.googleapis.com/bk_vn/nissan/orders/vn_nissan_colors.csv"
 
 # Botón de recarga
 if st.sidebar.button("🔄 Recargar datos"):
     st.cache_data.clear()
     st.session_state.data_loaded = False
     st.session_state.calculations_cache = {}
+    st.session_state.current_product_index = 0
+    st.session_state.product_key += 1
     st.rerun()
 
 # Carga de datos optimizada - Primero intenta desde GCP, luego desde URL
@@ -410,9 +418,28 @@ df['FAMILIA'] = df['CODIGO'].str[:3]
 familias = ['Todas'] + sorted(df['FAMILIA'].unique().tolist())
 estrats_all = ['Todas'] + sorted(df['ESTRAT'].dropna().unique().tolist())
 
-# Selección en sidebar
-selected_fam = st.sidebar.selectbox("Selecciona familia", familias)
-selected_estrat = st.sidebar.selectbox("Selecciona estratificación", estrats_all)
+# Selección en sidebar con manejo de estado
+selected_fam = st.sidebar.selectbox(
+    "Selecciona familia", 
+    familias, 
+    index=familias.index(st.session_state.selected_family),
+    key="family_selector"
+)
+
+selected_estrat = st.sidebar.selectbox(
+    "Selecciona estratificación", 
+    estrats_all, 
+    index=estrats_all.index(st.session_state.selected_strat),
+    key="strat_selector"
+)
+
+# Actualizar estado cuando cambian los selectores
+if selected_fam != st.session_state.selected_family or selected_estrat != st.session_state.selected_strat:
+    st.session_state.selected_family = selected_fam
+    st.session_state.selected_strat = selected_estrat
+    st.session_state.current_product_index = 0
+    st.session_state.product_key += 1
+    st.rerun()
 
 # Filtrar productos optimizado
 @st.cache_data(ttl=3600)
@@ -436,19 +463,31 @@ col_nav1, col_nav2, col_nav3 = st.columns([1, 2, 1])
 with col_nav1:
     if st.button("⬅️ Anterior"):
         st.session_state.current_product_index = (st.session_state.current_product_index - 1) % len(productos)
+        st.session_state.product_key += 1
         st.rerun()
 
 with col_nav3:
     if st.button("Siguiente ➡️"):
         st.session_state.current_product_index = (st.session_state.current_product_index + 1) % len(productos)
+        st.session_state.product_key += 1
         st.rerun()
 
 with col_nav2:
     current_index = st.session_state.current_product_index
-    sel = st.selectbox("Selecciona un producto", productos, index=current_index, key="product_selector")
     
+    # Selector de producto con key dinámica para evitar conflictos
+    sel = st.selectbox(
+        "Selecciona un producto", 
+        productos, 
+        index=current_index, 
+        key=f"product_selector_{st.session_state.product_key}"
+    )
+    
+    # Sincronizar el índice si el usuario selecciona un producto diferente
     if productos.index(sel) != current_index:
         st.session_state.current_product_index = productos.index(sel)
+        st.session_state.product_key += 1
+        st.rerun()
 
 st.write(f"**Producto {current_index + 1} de {len(productos)}**")
 
