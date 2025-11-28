@@ -564,28 +564,30 @@ def auto_save():
                 st.session_state.UserInputs[product]['GUARDADO'] = True
             st.sidebar.success("💾 Autoguardado completado")
 
-# --- CÁLCULO DE STOCK PROYECTADO CORREGIDO ---
+# --- CÁLCULO DE STOCK PROYECTADO CON TIMING CORREGIDO ---
 def calcular_stock_proyectado_corregido(proyecciones, pedidos_planificados, lead_time, stock_inicial, origen):
-    """Calcula el stock proyectado con timing CORREGIDO"""
+    """Calcula el stock proyectado con timing CORREGIDO según las especificaciones"""
     
-    # CORRECCIÓN: Determinar offset según origen
+    # CORRECCIÓN: Timing específico según origen
     if origen == 'NTJ':
-        offset_pedido = 2  # NTJ: n+2 para orden
+        # NTJ: Pedido n+2, Llegada n+5
+        meses_pedido = [2, 3, 4, 5]  # Meses desde planificación para colocar órdenes
     else:
-        offset_pedido = 4  # NMEX y otros: n+4 para orden
+        # Otros orígenes: Pedido n+4, Llegada n+6  
+        meses_pedido = [4, 5, 6, 7]  # Meses desde planificación para colocar órdenes
     
-    # Inicializar stock proyectado (mes actual - Noviembre = mes 0)
+    # Inicializar stock proyectado (mes actual = mes 0)
     stock_proyectado = [stock_inicial]
     
-    # Para cada mes proyectado (n+1 a n+12)
-    for mes_proyectado in range(1, 13):  # Desde mes 1 hasta mes 12
+    # Para cada mes proyectado (mes 1 a mes 12 desde planificación)
+    for mes_proyectado in range(1, 13):
         stock_actual = stock_proyectado[-1]
         
         # Calcular pedidos que llegan en este mes proyectado
         pedidos_que_llegan = 0
         for i, pedido in enumerate(pedidos_planificados):
-            # Mes en que se coloca la orden (desde planificación en Noviembre)
-            mes_colocacion_orden = offset_pedido + i
+            # Mes en que se coloca la orden
+            mes_colocacion_orden = meses_pedido[i]
             
             # Mes en que llega la orden
             mes_llegada_orden = mes_colocacion_orden + lead_time
@@ -877,31 +879,38 @@ with alert_col3:
     else:
         st.success("✅ Variabilidad normal")
 
-# --- ÓRDENES PLANIFICADAS CON CÁLCULOS CORREGIDOS ---
+# --- ÓRDENES PLANIFICADAS CON TIMING CORREGIDO ---
 st.subheader("✍️ Órdenes planificadas y sugeridas")
 st.info(f"ℹ️ Lead Time: {lead_time} meses | Nivel de servicio: {nivel_servicio}%")
 
-# CORRECCIÓN 2: Determinar estructura de órdenes según origen CON TIMING CORRECTO
+# TIMING CORREGIDO SEGÚN ESPECIFICACIONES
 if origen_actual == 'NTJ':
+    # NTJ: Pedido n+2, Llegada n+5
     meses_pedido = 4
-    offset_pedido = 2  # NTJ: n+2 para orden
+    offset_pedido = 2
     st.success(f"🔶 **Estructura NTJ** - Pedidos: n+{offset_pedido} | Llegada: n+{offset_pedido + lead_time}")
+    meses_desde_planificacion = [2, 3, 4, 5]  # Enero, Febrero, Marzo, Abril
 else:
+    # Otros orígenes: Pedido n+4, Llegada n+6
     meses_pedido = 4
-    offset_pedido = 4  # NMEX y otros: n+4 para orden
+    offset_pedido = 4
     st.success(f"🔷 **Estructura No-NTJ** - Pedidos: n+{offset_pedido} | Llegada: n+{offset_pedido + lead_time}")
+    meses_desde_planificacion = [4, 5, 6, 7]  # Marzo, Abril, Mayo, Junio
 
 # Fechas para órdenes CORREGIDAS
 ultima_fecha_ventas = pd.to_datetime(date_cols[-1])  # Octubre
 fecha_planificacion = ultima_fecha_ventas + pd.DateOffset(months=1)  # Noviembre (mes actual)
 
-mes_inicio = fecha_planificacion + pd.DateOffset(months=offset_pedido)
-fechas_ordenes = pd.date_range(start=mes_inicio.replace(day=1), periods=meses_pedido, freq='MS')
+# Calcular fechas de órdenes basadas en el timing corregido
+fechas_ordenes = []
+for mes_offset in meses_desde_planificacion:
+    fecha_orden = fecha_planificacion + pd.DateOffset(months=mes_offset)
+    fechas_ordenes.append(fecha_orden.replace(day=1))
 
 # Mostrar timeline CORREGIDO
 st.info(f"**Planificación actual:** {fecha_planificacion.strftime('%b %Y')} (n)")
-st.info(f"**Primera orden:** {fechas_ordenes[0].strftime('%b %Y')} (n+{offset_pedido})")
-st.info(f"**Primer arribo:** {(fechas_ordenes[0] + pd.DateOffset(months=lead_time)).strftime('%b %Y')} (n+{offset_pedido + lead_time})")
+st.info(f"**Primera orden:** {fechas_ordenes[0].strftime('%b %Y')} (n+{meses_desde_planificacion[0]})")
+st.info(f"**Primer arribo:** {(fechas_ordenes[0] + pd.DateOffset(months=lead_time)).strftime('%b %Y')} (n+{meses_desde_planificacion[0] + lead_time})")
 
 orden_cols = st.columns(meses_pedido)
 
@@ -910,8 +919,8 @@ for j in range(meses_pedido):
         mes_label = fechas_ordenes[j].strftime('%b %Y')
         st.markdown(f"### 📅 {mes_label}")
         
-        # CÁLCULOS CORREGIDOS - Índices correctos
-        mes_colocacion_orden = offset_pedido + j  # Mes en que se coloca la orden desde planificación
+        # CÁLCULOS CON TIMING CORREGIDO
+        mes_colocacion_orden = meses_desde_planificacion[j]  # Mes en que se coloca la orden desde planificación
         mes_llegada_orden = mes_colocacion_orden + lead_time  # Mes en que llega la orden
         
         # Mostrar información de timing CORREGIDA
