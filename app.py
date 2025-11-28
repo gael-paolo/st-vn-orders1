@@ -2,126 +2,271 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import re
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
+import json
+import warnings
+from google.cloud import storage
+from google.oauth2 import service_account
+warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="🚗 Análisis de Aprovisionamiento de Vehículos Nissan", layout="wide")
 st.title("🚗 Análisis de Aprovisionamiento de Vehículos Nissan")
 
-# --- Configuración de URLs públicas CON DIAGNÓSTICO MEJORADO ---
-@st.cache_data(ttl=3600)  # Cache por 1 hora
-def load_data_from_url(url, descripcion="archivo"):
-
+# --- Configuración de Google Cloud Storage con autenticación por JSON ---
+def get_gcp_client():
+    """Inicializa el cliente de Google Cloud Storage con credenciales desde secrets"""
     try:
-        # Hacer request con timeout
+        # Obtener credenciales desde Streamlit secrets
+        if 'gcp_service_account' in st.secrets:
+            service_account_info = dict(st.secrets['gcp_service_account'])
+            credentials = service_account.Credentials.from_service_account_info(service_account_info)
+            client = storage.Client(credentials=credentials)
+            return client
+        else:
+            st.error("❌ No se encontraron las credenciales de GCP en los secrets")
+            return None
+    except Exception as e:
+        st.error(f"❌ Error al inicializar cliente GCP: {str(e)}")
+        return None
+
+# --- Configuración mejorada de GCP ---
+BUCKET_NAME = "bk_vn"  # Nombre de tu bucket
+
+def get_user_filename(usuario):
+    """Genera el nombre de archivo para el usuario"""
+    current_month = datetime.now().strftime("%m_%Y")
+    safe_username = re.sub(r'[^a-zA-Z0-9_]', '_', usuario)
+    return f"nissan/orders/users/{current_month}_{safe_username}.csv"
+
+def save_user_data(usuario, user_data):
+    """Guarda los datos del usuario en GCP usando la API de Google Cloud Storage"""
+    try:
+        if not usuario or usuario == "Usuario":
+            st.warning("⚠️ Nombre de usuario no válido para guardar")
+            return False
+            
+        client = get_gcp_client()
+        if client is None:
+            st.error("❌ No se pudo inicializar el cliente de GCP")
+            return False
+            
+        filename = get_user_filename(usuario)
+        bucket = client.bucket(BUCKET_NAME)
+        blob = bucket.blob(filename)
+        
+        # Convertir datos a CSV optimizado
+        records = []
+        timestamp = datetime.now().isoformat()
+        
+        for producto, datos in user_data.items():
+            if 'Proyecciones' in datos:
+                for i, proyeccion in enumerate(datos['Proyecciones']):
+                    records.append({
+                        'usuario': usuario,
+                        'producto': producto,
+                        'tipo': 'proyeccion',
+                        'mes': i,
+                        'valor': proyeccion,
+                        'mos_objetivo': None,
+                        'fecha_actualizacion': timestamp
+                    })
+            
+            if 'Pedidos' in datos:
+                for i, (pedido, mos) in enumerate(zip(datos['Pedidos'], datos.get('MOS', [4.0]*4))):
+                    records.append({
+                        'usuario': usuario,
+                        'producto': producto,
+                        'tipo': 'pedido',
+                        'mes_orden': i,
+                        'valor': pedido,
+                        'mos_objetivo': mos,
+                        'fecha_actualizacion': timestamp
+                    })
+        
+        if not records:
+            st.warning("No hay datos para guardar")
+            return False
+            
+        df_save = pd.DataFrame(records)
+        
+        # Convertir a CSV en memoria
+        csv_buffer = io.StringIO()
+        df_save.to_csv(csv_buffer, index=False)
+        csv_content = csv_buffer.getvalue()
+        
+        # Subir a GCP
+        blob.upload_from_string(csv_content, content_type='text/csv')
+        
+        st.success(f"💾 Datos guardados exitosamente para {usuario}")
+        st.info(f"📍 Archivo guardado en: gs://{BUCKET_NAME}/{filename}")
+        
+        return True
+        
+    except Exception as e:
+        st.error(f"❌ Error al guardar datos en GCP: {str(e)}")
+        return False
+
+def load_user_data(usuario):
+    """Carga los datos del usuario desde GCP usando la API de Google Cloud Storage"""
+    try:
+        if not usuario or usuario == "Usuario":
+            return None
+            
+        client = get_gcp_client()
+        if client is None:
+            return None
+            
+        filename = get_user_filename(usuario)
+        bucket = client.bucket(BUCKET_NAME)
+        blob = bucket.blob(filename)
+        
+        # Verificar si el archivo existe
+        if not blob.exists():
+            return None
+        
+        # Descargar contenido
+        content = blob.download_as_text()
+        df_loaded = pd.read_csv(io.StringIO(content))
+        
+        st.sidebar.success("✅ Datos de usuario cargados desde GCP")
+        return df_loaded
+        
+    except Exception as e:
+        st.sidebar.info(f"ℹ️ No se encontraron datos previos del usuario: {str(e)}")
+        return None
+
+# --- Configuración optimizada para cargar datos base desde GCP usando la API ---
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_data_from_gcp(file_path, descripcion="archivo"):
+    """Carga datos desde Google Cloud Storage usando la API"""
+    try:
+        client = get_gcp_client()
+        if client is None:
+            st.error("❌ No se pudo inicializar el cliente de GCP")
+            return None
+            
+        bucket = client.bucket(BUCKET_NAME)
+        blob = bucket.blob(file_path)
+        
+        # Verificar si el archivo existe
+        if not blob.exists():
+            st.error(f"❌ El archivo {file_path} no existe en el bucket")
+            return None
+        
+        # Descargar contenido
+        content = blob.download_as_text()
+        df = pd.read_csv(io.StringIO(content))
+        
+        st.sidebar.success(f"✅ {descripcion} cargados desde GCP")
+        return df
+        
+    except Exception as e:
+        st.error(f"❌ Error al cargar {descripcion} desde GCP: {str(e)}")
+        return None
+
+# Función de respaldo por si falla la carga desde GCP (usa URLs públicas)
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_data_from_url(url, descripcion="archivo"):
+    try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
-
-        # Intentar parsear CSV
         df = pd.read_csv(io.StringIO(response.text))
-
+        st.sidebar.success(f"✅ {descripcion} cargados desde URL")
         return df
-
-    except requests.exceptions.Timeout:
-        st.error(f"⏱️ **Timeout** al cargar {descripcion} desde {url}")
-        st.error("El servidor tardó más de 30 segundos en responder.")
-        return None
-
-    except requests.exceptions.HTTPError as e:
-        st.error(f"❌ **Error HTTP {e.response.status_code}** al cargar {descripcion}")
-        if e.response.status_code == 403:
-            st.error("🔒 **Acceso Denegado (403)**")
-            st.info("""
-            **Soluciones:**
-            1. Verifica que el archivo sea público en Google Cloud Storage
-            2. Comando para hacer público:
-            ```bash
-            gsutil iam ch allUsers:objectViewer gs://TU_BUCKET/archivo.csv
-            ```
-            3. O desde la consola web: Bucket → archivo → Permisos → Agregar → allUsers → Storage Object Viewer
-            """)
-        elif e.response.status_code == 404:
-            st.error("📂 **Archivo No Encontrado (404)**")
-            st.info("Verifica que la URL sea correcta y que el archivo exista en el bucket.")
-        return None
-
-    except pd.errors.ParserError as e:
-        st.error(f"📄 **Error al parsear CSV**: {str(e)}")
-        st.info("El archivo descargado no tiene formato CSV válido.")
-        return None
-
     except Exception as e:
-        st.error(f"❌ **Error inesperado**: {type(e).__name__}")
-        st.error(f"Detalles: {str(e)}")
+        st.error(f"❌ Error al cargar {descripcion}: {str(e)}")
         return None
 
-# --- Usuario ---
+# --- Gestión de estado mejorada ---
+def initialize_session_state():
+    """Inicializa y gestiona el estado de la sesión"""
+    if 'UserInputs' not in st.session_state:
+        st.session_state.UserInputs = {}
+    if 'last_save' not in st.session_state:
+        st.session_state.last_save = datetime.now()
+    if 'current_product_index' not in st.session_state:
+        st.session_state.current_product_index = 0
+    if 'data_loaded' not in st.session_state:
+        st.session_state.data_loaded = False
+    if 'calculations_cache' not in st.session_state:
+        st.session_state.calculations_cache = {}
+    if 'recalculate_orders' not in st.session_state:
+        st.session_state.recalculate_orders = False
+
+initialize_session_state()
+
+# --- Usuario y carga de datos optimizada ---
 usuario = st.sidebar.text_input("Nombre de usuario", value="Usuario")
 
-# --- Verificar que existen los secrets ---
-try:
-    URL_ORDERS = st.secrets["URL_ORDERS"]
-    URL_COLORS = st.secrets["URL_COLORS"]
-except KeyError as e:
-    st.error(f"❌ **Error de configuración**: Falta el secret {str(e)}")
-    st.info("""
-    **Configura los secrets:**
-    
-    En Streamlit Cloud: Settings → Secrets
-    
-    ```toml
-    URL_ORDERS = "https://storage.googleapis.com/tu-bucket/orders.csv"
-    URL_COLORS = "https://storage.googleapis.com/tu-bucket/colors.csv"
-    ```
-    """)
-    st.stop()
+# Cargar datos existentes del usuario solo si es necesario
+if not st.session_state.data_loaded:
+    user_existing_data = load_user_data(usuario)
+    st.session_state.data_loaded = True
+else:
+    user_existing_data = None
 
-# Botón de recarga en sidebar
+# Paths de datos en GCP
+GCP_ORDERS_PATH = "nissan/orders/vn_nissan_order.csv"
+GCP_COLORS_PATH = "nissan/orders/vn_nissan_colors.csv"
+
+# URLs de respaldo (por si falla la carga desde GCP)
+URL_ORDERS = st.secrets["URL_ORDERS"]
+URL_COLORS = st.secrets["URL_COLORS"]
+
+# Botón de recarga
 if st.sidebar.button("🔄 Recargar datos"):
     st.cache_data.clear()
+    st.session_state.data_loaded = False
+    st.session_state.calculations_cache = {}
     st.rerun()
 
-# --- Carga de datos desde URLs públicas ---
-with st.spinner("📥 Cargando datos desde Google Cloud Storage..."):
-    df = load_data_from_url(URL_ORDERS, "órdenes")
-    df_colores = load_data_from_url(URL_COLORS, "colores")
+# Carga de datos optimizada - Primero intenta desde GCP, luego desde URL
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_all_data():
+    with st.spinner("📥 Cargando datos desde Google Cloud Storage..."):
+        # Intentar cargar desde GCP primero
+        df = load_data_from_gcp(GCP_ORDERS_PATH, "órdenes")
+        df_colores = load_data_from_gcp(GCP_COLORS_PATH, "colores")
+        
+        # Si falla la carga desde GCP, usar URLs de respaldo
+        if df is None:
+            st.warning("⚠️ Intentando cargar datos desde URLs de respaldo...")
+            df = load_data_from_url(URL_ORDERS, "órdenes")
+        
+        if df_colores is None:
+            df_colores = load_data_from_url(URL_COLORS, "colores")
+            
+    return df, df_colores
+
+df, df_colores = load_all_data()
 
 if df is None:
     st.error("❌ No se pudo cargar el archivo de órdenes.")
-    st.info(f"**URL configurada:** {URL_ORDERS}")
-    st.info("""
-    **Pasos para solucionar:**
-    1. **Verifica que la URL sea correcta**
-    2. **Haz el archivo público en GCP**
-    3. **Prueba la URL en tu navegador**
-    4. **Verifica el formato del archivo (CSV válido)**
-    """)
     st.stop()
 
-# --- Mapeo flexible de columnas ---
+# --- Mapeo flexible de columnas mejorado ---
 def map_column_names(df):
-    """Mapea nombres de columnas alternativos a los esperados"""
     column_mapping = {}
-    
-    # Columnas OBLIGATORIAS
     required_map = {
         'CODIGO': ['CODIGO', 'CÓDIGO', 'COD', 'MODELO', 'SKU', 'Producto', 'Código', 'codigo'],
         'ORIGEN': ['ORIGEN', 'FUENTE', 'SOURCE', 'PROCEDENCIA', 'Origen', 'origen'],
         'Stock': ['Stock', 'STOCK', 'INVENTARIO', 'INVENTORY', 'EXISTENCIAS', 'stock']
     }
     
-    # Columnas OPCIONALES (pueden o no estar)
     optional_map = {
         'RES_IVN': ['RES_IVN', 'RESERVAS_IVN', 'IVN_RES', 'RESERVA_IVN', 'res_ivn'],
         'RES_TRANS': ['RES_TRANS', 'RESERVAS_TRANS', 'TRANS_RES', 'RESERVA_TRANS', 'res_trans'],
-        'RES_PED': ['RES_PED', 'RESERVAS_PED', 'PED_RES', 'RESERVA_PED', 'res_ped']
+        'RES_PED': ['RES_PED', 'RESERVAS_PED', 'PED_RES', 'RESERVA_PED', 'res_ped'],
+        'ESTRAT': ['ESTRAT', 'ESTRATEGIA', 'STRAT', 'CATEGORIA', 'estrat']
     }
     
     missing_cols = []
     
-    # Procesar columnas obligatorias
     for expected_col, possible_names in required_map.items():
         found = False
         for possible in possible_names:
@@ -129,253 +274,451 @@ def map_column_names(df):
                 column_mapping[expected_col] = possible
                 found = True
                 break
-        
         if not found:
             missing_cols.append(expected_col)
-            st.sidebar.error(f"❌ No se encontró: {expected_col}")
     
-    # Procesar columnas opcionales
     for expected_col, possible_names in optional_map.items():
-        found = False
         for possible in possible_names:
             if possible in df.columns:
                 column_mapping[expected_col] = possible
-                found = True
                 break
             
     return column_mapping, missing_cols
 
-# Aplicar mapeo
 column_mapping, missing_cols = map_column_names(df)
-
 if missing_cols:
     st.error(f"⚠️ Faltan columnas requeridas: {', '.join(missing_cols)}")
     st.stop()
 
-# Renombrar columnas
 df = df.rename(columns=column_mapping)
-
-# Crear columnas opcionales con valor 0 si no existen
-columnas_opcionales = ['RES_IVN', 'RES_TRANS', 'RES_PED']
+columnas_opcionales = ['RES_IVN', 'RES_TRANS', 'RES_PED', 'ESTRAT']
 for col in columnas_opcionales:
     if col not in df.columns:
-        df[col] = 0
+        df[col] = 0 if col.startswith('RES') else 'A'
 
-st.sidebar.success("✅ Todas las columnas requeridas están disponibles")
+# --- Validación de datos mejorada ---
+def validar_datos_dataframe(df, date_cols):
+    """Valida la integridad de los datos"""
+    issues = []
+    
+    # Validar fechas
+    try:
+        fechas = pd.to_datetime(date_cols)
+        diferencias = (fechas[1:] - fechas[:-1]).days
+        if any(diff > 35 for diff in diferencias):
+            issues.append("⚠️ Hay saltos en las fechas históricas (más de 35 días entre meses)")
+    except Exception as e:
+        issues.append(f"❌ Error en formato de fechas: {e}")
+    
+    # Validar valores negativos
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    for col in numeric_cols:
+        if (df[col] < 0).any():
+            issues.append(f"⚠️ Columna {col} tiene valores negativos")
+    
+    # Validar datos faltantes
+    for col in ['CODIGO', 'ORIGEN', 'Stock']:
+        if df[col].isna().any():
+            issues.append(f"⚠️ Columna {col} tiene valores faltantes")
+    
+    return issues
 
-if df_colores is not None:
-    st.sidebar.success("✅ Datos de colores cargados")
-else:
-    st.sidebar.warning("⚠️ No se pudieron cargar los datos de colores")
+# --- Configuración inicial optimizada ---
+@st.cache_data(ttl=3600)
+def get_date_columns(df):
+    date_cols = [c for c in df.columns if re.match(r'^\d{4}-\d{2}-\d{2}$', str(c))]
+    date_cols = sorted(date_cols, key=lambda x: pd.to_datetime(x))
+    return date_cols
 
-# --- Columnas de fechas ---
-date_cols = [c for c in df.columns if re.match(r'^\d{4}-\d{2}-\d{2}$', str(c))]
-date_cols = sorted(date_cols, key=lambda x: pd.to_datetime(x))
+date_cols = get_date_columns(df)
 if not date_cols:
-    st.error("No se detectaron columnas de fechas (YYYY-MM-DD).")
+    st.error("No se detectaron columnas de fechas.")
     st.stop()
+
+# Validar datos
+validation_issues = validar_datos_dataframe(df, date_cols)
+if validation_issues:
+    with st.expander("🔍 Issues de Validación de Datos"):
+        for issue in validation_issues:
+            st.write(issue)
+
 num_months = st.sidebar.slider("Cantidad de meses a mostrar", 6, len(date_cols), min(12, len(date_cols)))
 date_cols = date_cols[-num_months:]
 
-# --- Lead time por ORIGEN ---
+# --- Lead time y nivel de servicio ---
 def get_lead_time(origen):
     return {'NMEX':2,'NTE':3,'NTJ':4}.get(origen,3)
 df['Lead_Time'] = df['ORIGEN'].apply(get_lead_time)
 
-# --- Nivel de servicio ---
 nivel_servicio = st.sidebar.selectbox("Nivel de servicio (%)", options=[80,85,90,95,97.5,99], index=3)
 z_dict = {80:0.84,85:1.04,90:1.28,95:1.65,97.5:1.96,99:2.33}
 z = z_dict[nivel_servicio]
 
-# --- Métricas base con protección matemática ---
-df['Media'] = df[date_cols].mean(axis=1)
-df['Media_Safe'] = df['Media'].clip(lower=0.01)
+# --- Cálculos base optimizados CON STOCK DE SEGURIDAD DINÁMICO ---
+@st.cache_data(ttl=3600)
+def calcular_metricas_base(df, date_cols, z):
+    """Calcula métricas base de manera optimizada con stock de seguridad dinámico"""
+    df_calc = df.copy()
+    
+    # Métricas estadísticas vectorizadas
+    df_calc['Media'] = df_calc[date_cols].mean(axis=1)
+    df_calc['Media_Safe'] = df_calc['Media'].clip(lower=0.01)
+    df_calc['Desviacion'] = df_calc[date_cols].std(axis=1, ddof=0)
+    df_calc['Coef_Variacion'] = np.where(
+        df_calc['Media'] > 0.01, 
+        df_calc['Desviacion'] / df_calc['Media'], 
+        0
+    )
+    
+    # Stock de seguridad DINÁMICO basado en proyecciones
+    # Para cada producto, calcularemos SS basado en su variabilidad histórica
+    # pero en las órdenes planificadas se usará SS dinámico basado en proyecciones
+    df_calc['Stock_Seguridad'] = np.where(
+        (df_calc['Media'] > 0.01) & (df_calc['Desviacion'] > 0),
+        z * df_calc['Desviacion'] * np.sqrt(df_calc['Lead_Time']),
+        0
+    )
+    
+    # Totales optimizados
+    df_calc['Total_Pedidos'] = df_calc.filter(like='Ped').fillna(0).sum(axis=1)
+    df_calc['Total_Transito'] = df_calc.filter(like='Trans').fillna(0).sum(axis=1)
+    
+    # Reservas
+    reserva_cols = [c for c in ['RES_IVN', 'RES_TRANS', 'RES_PED'] if c in df_calc.columns]
+    df_calc['Total_Reservas'] = df_calc[reserva_cols].fillna(0).sum(axis=1)
+    
+    # Stock disponible y meses de inventario
+    df_calc['Stock_Disponible'] = (
+        df_calc['Stock'].fillna(0) + 
+        df_calc['Total_Transito'].fillna(0) + 
+        df_calc['Total_Pedidos'].fillna(0) - 
+        df_calc['Total_Reservas'].fillna(0)
+    )
+    
+    df_calc['Meses_Inventario'] = np.where(
+        df_calc['Media'] > 0.01,
+        df_calc['Stock_Disponible'] / df_calc['Media'],
+        999
+    )
+    
+    return df_calc
 
-df['Desviacion'] = df[date_cols].std(axis=1)
-df['Coef_Variacion'] = np.where(
-    df['Media'] > 0.01,
-    df['Desviacion'] / df['Media'],
-    0
-)
+df = calcular_metricas_base(df, date_cols, z)
 
-df['Stock_Seguridad'] = np.where(
-    (df['Media'] > 0.01) & (df['Desviacion'] > 0),
-    z * df['Desviacion'] * np.sqrt(df['Lead_Time']),
-    0
-)
-
-df['Total_Pedidos'] = df.filter(like='Ped').fillna(0).sum(axis=1)
-df['Total_Transito'] = df.filter(like='Trans').fillna(0).sum(axis=1)
-
-# Total de reservas
-df['Total_Reservas'] = 0
-if 'RES_IVN' in df.columns:
-    df['Total_Reservas'] += df['RES_IVN'].fillna(0)
-if 'RES_TRANS' in df.columns:
-    df['Total_Reservas'] += df['RES_TRANS'].fillna(0)
-if 'RES_PED' in df.columns:
-    df['Total_Reservas'] += df['RES_PED'].fillna(0)
-
-df['Stock_Disponible'] = (
-    df['Stock'].fillna(0) + 
-    df['Total_Transito'].fillna(0) + 
-    df['Total_Pedidos'].fillna(0) - 
-    df['Total_Reservas'].fillna(0)
-)
-
-df['Meses_Inventario'] = np.where(
-    df['Media'] > 0.01, 
-    df['Stock_Disponible'] / df['Media'], 
-    999
-)
-
-# --- Selección de familia, estratificación y producto ---
+# --- Pestañas para familias optimizadas ---
 df['FAMILIA'] = df['CODIGO'].str[:3]
-familias = sorted(df['FAMILIA'].unique().tolist())
+familias = ['Todas'] + sorted(df['FAMILIA'].unique().tolist())
+estrats_all = ['Todas'] + sorted(df['ESTRAT'].dropna().unique().tolist())
+
+# Selección en sidebar
 selected_fam = st.sidebar.selectbox("Selecciona familia", familias)
+selected_estrat = st.sidebar.selectbox("Selecciona estratificación", estrats_all)
 
-# NUEVO: selector ESTRAT bajo familia (sidebar)
-estrats = sorted(df[df['FAMILIA']==selected_fam]['ESTRAT'].dropna().unique().tolist())
-# Si no hay ESTRAT, ponemos una opción por defecto
-if not estrats:
-    estrats = ['SIN ESTRAT']
-selected_estrat = st.sidebar.selectbox("Selecciona estratificación (ESTRAT)", estrats)
+# Filtrar productos optimizado
+@st.cache_data(ttl=3600)
+def filtrar_productos(df, familia, estrat):
+    df_filtrado = df.copy()
+    if familia != 'Todas':
+        df_filtrado = df_filtrado[df_filtrado['FAMILIA'] == familia]
+    if estrat != 'Todas':
+        df_filtrado = df_filtrado[df_filtrado['ESTRAT'] == estrat]
+    return sorted(df_filtrado['CODIGO'].unique().tolist())
 
-# Filtrar productos por familia + estrat
-productos = sorted(df[(df['FAMILIA']==selected_fam) & (df['ESTRAT']==selected_estrat)]['CODIGO'].unique().tolist())
+productos = filtrar_productos(df, selected_fam, selected_estrat)
+
 if not productos:
-    st.warning("No se encontraron productos para la combinación Familia / Estratificación seleccionada.")
+    st.warning("No se encontraron productos para la combinación seleccionada.")
     st.stop()
 
-sel = st.selectbox("Selecciona un producto", productos)
-prod = df[df['CODIGO']==sel].iloc[0]
+# --- Navegación mejorada ---
+col_nav1, col_nav2, col_nav3 = st.columns([1, 2, 1])
+
+with col_nav1:
+    if st.button("⬅️ Anterior"):
+        st.session_state.current_product_index = (st.session_state.current_product_index - 1) % len(productos)
+        st.rerun()
+
+with col_nav3:
+    if st.button("Siguiente ➡️"):
+        st.session_state.current_product_index = (st.session_state.current_product_index + 1) % len(productos)
+        st.rerun()
+
+with col_nav2:
+    current_index = st.session_state.current_product_index
+    sel = st.selectbox("Selecciona un producto", productos, index=current_index, key="product_selector")
+    
+    if productos.index(sel) != current_index:
+        st.session_state.current_product_index = productos.index(sel)
+
+st.write(f"**Producto {current_index + 1} de {len(productos)}**")
+
+prod = df[df['CODIGO'] == sel].iloc[0]
 lead_time = int(prod['Lead_Time'])
 
-# ----------------------------------------------------------------------
-# --- INICIALIZACIÓN DE INPUTS (AJUSTADA PARA EL BOTÓN GUARDAR) ---
-# ----------------------------------------------------------------------
-if 'UserInputs' not in st.session_state:
-    st.session_state['UserInputs'] = {}
-
-# Inicialización por producto si no existe
-if sel not in st.session_state['UserInputs']:
+# --- Inicialización mejorada de UserInputs ---
+def inicializar_datos_usuario(sel, prod, date_cols, user_existing_data=None):
+    """Inicializa o carga datos del usuario de manera optimizada"""
+    
+    if sel in st.session_state.UserInputs:
+        return st.session_state.UserInputs[sel]
+    
     hist_mean = int(prod[date_cols].mean()) if not np.isnan(prod[date_cols].mean()) else 0
-    st.session_state['UserInputs'][sel] = {
-        'Proyecciones': [hist_mean]*12, 
-        'Pedidos': [0]*4, 
-        'MOS': [2.0]*4,
-        'GUARDADO': False 
+    
+    # Intentar cargar datos guardados
+    datos_iniciales = {
+        'Proyecciones': [hist_mean] * 12,
+        'Pedidos': [0] * 4,
+        'MOS': [4.0] * 4,
+        'GUARDADO': False,
+        'last_update': datetime.now()
     }
+    
+    if user_existing_data is not None:
+        user_prod_data = user_existing_data[user_existing_data['producto'] == sel]
+        if not user_prod_data.empty:
+            proyecciones_user = [0] * 12
+            pedidos_user = [0] * 4
+            mos_user = [4.0] * 4
+            
+            proyecciones_data = user_prod_data[user_prod_data['tipo'] == 'proyeccion']
+            for _, row in proyecciones_data.iterrows():
+                if 0 <= row['mes'] < 12:
+                    proyecciones_user[int(row['mes'])] = row['valor']
+            
+            pedidos_data = user_prod_data[user_prod_data['tipo'] == 'pedido']
+            for _, row in pedidos_data.iterrows():
+                if 0 <= row['mes_orden'] < 4:
+                    idx = int(row['mes_orden'])
+                    pedidos_user[idx] = row['valor']
+                    mos_user[idx] = row['mos_objetivo']
+            
+            datos_iniciales.update({
+                'Proyecciones': proyecciones_user,
+                'Pedidos': pedidos_user,
+                'MOS': mos_user,
+                'GUARDADO': True
+            })
+    
+    st.session_state.UserInputs[sel] = datos_iniciales
+    return datos_iniciales
 
-# Asegurar espacio para figuras y control de proyecciones por producto
-fig_key = f"fig_{sel}"
-last_proj_key = f"last_proj_{sel}"
-if fig_key not in st.session_state:
-    st.session_state[fig_key] = None
-if last_proj_key not in st.session_state:
-    st.session_state[last_proj_key] = None
+user_data = inicializar_datos_usuario(sel, prod, date_cols, user_existing_data)
 
-# --- Gráfico histórico + proyección (se genera de forma eficiente) ---
-hist = prod[date_cols].T.reset_index()
-hist.columns = ['Fecha','Ventas']
-hist['Fecha'] = pd.to_datetime(hist['Fecha'])
-proy_fechas = pd.date_range(start=hist['Fecha'].max() + pd.offsets.MonthBegin(), periods=12, freq='MS')
+# --- Función de autoguardado mejorada ---
+def auto_save():
+    """Guarda automáticamente si hay cambios pendientes"""
+    current_time = datetime.now()
+    time_diff = (current_time - st.session_state.last_save).total_seconds()
+    
+    # Verificar si hay datos no guardados
+    has_unsaved = any(not data.get('GUARDADO', False) for data in st.session_state.UserInputs.values())
+    
+    if has_unsaved and time_diff > 120:  # 2 minutos
+        if save_user_data(usuario, st.session_state.UserInputs):
+            st.session_state.last_save = current_time
+            for product in st.session_state.UserInputs:
+                st.session_state.UserInputs[product]['GUARDADO'] = True
+            st.sidebar.success("💾 Autoguardado completado")
 
-# Función pequeña para crear figura
-def crear_figura(prod_codigo):
-    prod_row = df[df['CODIGO']==prod_codigo].iloc[0]
-    hist_local = prod_row[date_cols].T.reset_index()
-    hist_local.columns = ['Fecha','Ventas']
-    hist_local['Fecha'] = pd.to_datetime(hist_local['Fecha'])
-    proj_vals = st.session_state['UserInputs'][prod_codigo]['Proyecciones']
-    proy_dates_local = pd.date_range(start=hist_local['Fecha'].max() + pd.offsets.MonthBegin(), periods=len(proj_vals), freq='MS')
-    fig_local = px.line()
-    fig_local.add_scatter(x=hist_local['Fecha'], y=hist_local['Ventas'], mode='lines+markers', name='Histórico', line=dict(color='blue'))
-    fig_local.add_scatter(x=proy_dates_local, y=proj_vals, mode='lines+markers', name='Proyección', line=dict(color='orange', dash='dash'))
-    fig_local.update_layout(title=f"Serie de tiempo: {prod_codigo}", xaxis_title="Mes", yaxis_title="Unidades", hovermode='x unified', height=420)
-    return fig_local
+# --- Cálculo de stock proyectado CORREGIDO ---
+def calcular_stock_proyectado_corregido(prod_codigo, proyecciones, pedidos_planificados, lead_time, stock_inicial):
+    """Calcula el stock proyectado con timing correcto de pedidos"""
+    
+    stock_proyectado = [stock_inicial]  # Mes actual (n)
+    
+    # Para cada mes proyectado (n+1 a n+12)
+    for mes in range(12):
+        stock_actual = stock_proyectado[-1]
+        
+        # Calcular pedidos que llegan este mes
+        pedidos_que_llegan = 0
+        for i, pedido in enumerate(pedidos_planificados):
+            mes_orden = i  # n+4 a n+7
+            mes_llegada = mes_orden + 4 + lead_time  # Mes real de llegada
+            
+            if mes_llegada == mes + 1:  # +1 porque empezamos desde mes n+1
+                pedidos_que_llegan += pedido
+        
+        # Calcular demanda de este mes
+        demanda_mes = proyecciones[mes] if mes < len(proyecciones) else 0
+        
+        # Calcular nuevo stock
+        nuevo_stock = stock_actual + pedidos_que_llegan - demanda_mes
+        stock_proyectado.append(max(0, nuevo_stock))
+    
+    return stock_proyectado
 
-# Si las proyecciones cambiaron o no hay figura guardada, generamos
-current_proy = list(st.session_state['UserInputs'][sel]['Proyecciones'])
-if st.session_state[last_proj_key] != current_proy or st.session_state[fig_key] is None:
-    st.session_state[fig_key] = crear_figura(sel)
-    st.session_state[last_proj_key] = current_proy
+# --- Visualización principal mejorada ---
+def crear_visualizacion_principal(prod_codigo, proyecciones, pedidos, lead_time):
+    """Crea la visualización principal con stock proyectado corregido"""
+    prod_row = df[df['CODIGO'] == prod_codigo].iloc[0]
+    
+    # Datos históricos
+    hist_data = prod_row[date_cols].T.reset_index()
+    hist_data.columns = ['Fecha', 'Ventas']
+    hist_data['Fecha'] = pd.to_datetime(hist_data['Fecha'])
+    
+    # Fechas de proyección
+    proy_dates = pd.date_range(
+        start=hist_data['Fecha'].max() + pd.offsets.MonthBegin(), 
+        periods=len(proyecciones), 
+        freq='MS'
+    )
+    
+    # Calcular stock proyectado CORREGIDO
+    stock_inicial = prod_row['Stock_Disponible']
+    stock_proyectado = calcular_stock_proyectado_corregido(
+        prod_codigo, proyecciones, pedidos, lead_time, stock_inicial
+    )
+    
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    
+    # Serie histórica
+    fig.add_trace(
+        go.Scatter(
+            x=hist_data['Fecha'], y=hist_data['Ventas'],
+            mode='lines+markers', name='Ventas Históricas',
+            line=dict(color='blue', width=3),
+            marker=dict(size=6)
+        ),
+        secondary_y=False,
+    )
+    
+    # Proyecciones
+    fig.add_trace(
+        go.Scatter(
+            x=proy_dates, y=proyecciones,
+            mode='lines+markers', name='Ventas Proyectadas',
+            line=dict(color='orange', width=3, dash='dash'),
+            marker=dict(size=6, symbol='diamond')
+        ),
+        secondary_y=False,
+    )
+    
+    # Stock proyectado
+    fig.add_trace(
+        go.Bar(
+            x=proy_dates, y=stock_proyectado[1:13],  # Desde mes n+1
+            name='Stock Proyectado',
+            marker_color='lightgreen', opacity=0.7,
+            hovertemplate='Stock: %{y:.0f} unidades<extra></extra>'
+        ),
+        secondary_y=True,
+    )
+    
+    # Línea de stock de seguridad
+    stock_seguridad = prod_row['Stock_Seguridad']
+    fig.add_hline(
+        y=stock_seguridad, line_dash="dot", 
+        line_color="red", opacity=0.7,
+        annotation_text=f"Stock Seguridad: {stock_seguridad:.0f}",
+        secondary_y=True
+    )
+    
+    fig.update_layout(
+        title=f"Serie de Tiempo y Stock Proyectado: {prod_codigo}",
+        xaxis_title="Mes",
+        hovermode='x unified',
+        height=500,
+        showlegend=True,
+        plot_bgcolor='rgba(240,240,240,0.1)'
+    )
+    
+    fig.update_yaxes(title_text="Ventas (unidades)", secondary_y=False)
+    fig.update_yaxes(title_text="Stock Proyectado (unidades)", secondary_y=True)
+    
+    return fig, stock_proyectado
 
-# Mostrar figura guardada
-st.plotly_chart(st.session_state[fig_key], use_container_width=True)
+# Generar y mostrar gráfico principal
+current_proy = user_data['Proyecciones']
+current_pedidos = user_data['Pedidos']
 
-# --- Ventas proyectadas con inputs (12 meses) y botón de actualizar proyección ---
+fig_principal, stock_proyectado = crear_visualizacion_principal(sel, current_proy, current_pedidos, lead_time)
+st.plotly_chart(fig_principal, use_container_width=True)
+
+# --- Ventas proyectadas (12 meses) ---
 st.subheader("✍️ Ventas proyectadas (12 meses)")
 cols_proj = st.columns(4)
-for i in range(12):
-    with cols_proj[i%4]:
-        # Key único por producto y mes
-        key_name = f'proj_{sel}_{i}'
-        value_current = int(st.session_state['UserInputs'][sel]['Proyecciones'][i])
-        val = st.number_input(
-            f'Mes {i+1}', 
-            min_value=0, 
-            step=1, 
-            value=value_current, 
-            key=key_name
-        )
-        # actualizar el session_state de proyecciones en caliente para que el botón use los valores nuevos
-        st.session_state['UserInputs'][sel]['Proyecciones'][i] = val
 
-# Botón que regenera la figura y la guarda en session_state para respuesta rápida
-if st.button("🔁 Actualizar proyección"):
-    # regenerar figura con las proyecciones actuales
-    st.session_state[fig_key] = crear_figura(sel)
-    st.session_state[last_proj_key] = list(st.session_state['UserInputs'][sel]['Proyecciones'])
-    st.toast("📈 Gráfico de proyección actualizado", icon="🔁")
-    st.rerun()
+for col_idx in range(4):
+    with cols_proj[col_idx]:
+        for row_idx in range(3):
+            i = (col_idx * 3) + row_idx
+            if i < 12:
+                key_name = f'proj_{sel}_{i}'
+                value_current = int(user_data['Proyecciones'][i])
+                mes_label = (pd.to_datetime(date_cols[-1]) + pd.offsets.MonthBegin() + pd.DateOffset(months=i)).strftime('%b %Y')
+                
+                val = st.number_input(
+                    f'{mes_label}', 
+                    min_value=0, 
+                    step=1, 
+                    value=value_current, 
+                    key=key_name
+                )
+                
+                if val != user_data['Proyecciones'][i]:
+                    user_data['Proyecciones'][i] = val
+                    user_data['last_update'] = datetime.now()
+                    user_data['GUARDADO'] = False
 
-# --- Métricas del producto (resto del código igual) ---
+# --- Métricas del producto mejoradas ---
 st.subheader(f"📊 Métricas del producto {sel}")
-col1, col2 = st.columns(2)
-# ... (restante código de métricas, igual) ...
+col1, col2, col3 = st.columns(3)
 
 with col1:
     st.metric("Media de ventas", f"{prod['Media']:.2f}")
-    st.metric("Coef. Variación", f"{prod['Coef_Variacion']*100:.2f}%")
+    st.metric("Desviación estándar", f"{prod['Desviacion']:.2f}")
     
-    if 'Movimientos_4_Meses' in prod:
-        st.write(f"Movimientos 4 meses: {prod['Movimientos_4_Meses']}")
-        st.progress(min(prod['Movimientos_4_Meses']/12, 1.0))
-    if 'Movimientos_6_Meses' in prod:
-        st.write(f"Movimientos 6 meses: {prod['Movimientos_6_Meses']}")
-        st.progress(min(prod['Movimientos_6_Meses']/12, 1.0))
-        
-with col2:
-    if 'Movimientos_12_Meses' in prod:
-        st.write(f"Movimientos 12 meses: {prod['Movimientos_12_Meses']}")
-        st.progress(min(prod['Movimientos_12_Meses']/12, 1.0))
+    # Coeficiente de variación con umbral corregido (150%)
+    cv_color = "red" if prod['Coef_Variacion'] > 1.5 else "green"
+    st.markdown(f"<span style='color: {cv_color}'>Coef. Variación: {prod['Coef_Variacion']*100:.1f}%</span>", 
+                unsafe_allow_html=True)
     
-    if 'Tendencia' in prod:
-        tend_color = {'++':'green', '+':'lightgreen', '0':'gray', '-':'red', '--':'darkred'}
-        st.markdown(
-            f"**Tendencia:** <span style='color:{tend_color.get(prod['Tendencia'],'black')}; font-size:30px'>{prod['Tendencia']}</span>", 
-            unsafe_allow_html=True
-        )
-    if 'ESTRAT' in prod:
-        estrat_color = {'A':'green', 'B':'gray', 'C':'yellow', 'D':'deepskyblue', 'E':'red'}
-        st.markdown(
-            f"**Estratificación:** <span style='color:{estrat_color.get(prod['ESTRAT'],'black')}; font-size:30px'>{prod['ESTRAT']}</span>", 
-            unsafe_allow_html=True
-        )
-    
-    st.metric("Stock de seguridad", f"{prod['Stock_Seguridad']:.0f}")
-    st.metric("Stock Disponible", f"{prod['Stock_Disponible']:.0f}")
+    st.metric("Stock Seguridad", f"{prod['Stock_Seguridad']:.0f}")
 
-# --- Inventario Detallado (resto del código igual) ---
+with col2:
+    if 'ESTRAT' in prod:
+        estrat_color = {'A': 'green', 'B': 'gray', 'C': 'yellow', 'D': 'deepskyblue', 'E': 'red'}
+        color = estrat_color.get(prod['ESTRAT'], 'black')
+        st.markdown(
+            f"**Estratificación:** <span style='color:{color}; font-size:24px'>{prod['ESTRAT']}</span>", 
+            unsafe_allow_html=True
+        )
+    
+    st.metric("Lead Time", f"{lead_time} meses")
+    st.metric("Stock Disponible", f"{prod['Stock_Disponible']:.0f}")
+    st.metric("Meses Inventario", f"{prod['Meses_Inventario']:.1f}")
+
+with col3:
+    # Alertas visuales mejoradas
+    st.write("**🔍 Estado de Inventario**")
+    
+    # Alerta stock vs seguridad
+    if prod['Stock_Disponible'] < prod['Stock_Seguridad']:
+        st.error(f"🚨 Stock bajo seguridad: {prod['Stock_Disponible']:.0f} < {prod['Stock_Seguridad']:.0f}")
+    elif prod['Stock_Disponible'] < prod['Stock_Seguridad'] * 1.5:
+        st.warning(f"⚠️ Stock cerca del mínimo: {prod['Stock_Disponible']:.0f}")
+    else:
+        st.success(f"✅ Stock adecuado: {prod['Stock_Disponible']:.0f}")
+    
+    # Alerta coeficiente variación
+    if prod['Coef_Variacion'] > 1.5:
+        st.error(f"📊 Alta variabilidad: CV={prod['Coef_Variacion']*100:.0f}%")
+    elif prod['Coef_Variacion'] > 1.0:
+        st.warning(f"📊 Variabilidad media: CV={prod['Coef_Variacion']*100:.0f}%")
+    else:
+        st.success(f"📊 Variabilidad normal: CV={prod['Coef_Variacion']*100:.0f}%")
+
+# --- INVENTARIO DETALLADO (VERSIÓN ANTERIOR MEJORADA) ---
 st.subheader("📦 Inventario Detallado")
 cols_inv = st.columns(4)
-cols_names = ['Stock', 'Pedidos', 'Tránsito', 'Reservas']
+cols_names = ['Stock', 'Tránsito', 'Pedidos', 'Reservas']
 
 cols_data = [
     ['Stock'], 
-    [c for c in df.columns if re.match(r'^Ped', c)],
     [c for c in df.columns if re.match(r'^Trans', c)], 
+    [c for c in df.columns if re.match(r'^Ped', c)],
     []
 ]
 
@@ -390,19 +733,29 @@ for col_name, col, data_cols in zip(cols_names, cols_inv, cols_data):
         st.write(f"**{col_name}**")
         available_cols = [c for c in data_cols if c in df.columns]
         if available_cols:
-            st.dataframe(prod[available_cols])
+            # Crear DataFrame para mostrar
+            display_data = []
+            for c in available_cols:
+                display_data.append({
+                    'Concepto': c,
+                    'Valor': f"{prod[c]:.0f}" if pd.notna(prod[c]) else "0"
+                })
+            display_df = pd.DataFrame(display_data)
+            st.dataframe(display_df, hide_index=True, use_container_width=True)
         else:
             st.info(f"No hay datos de {col_name}")
 
 # --- Totales ---
-tot_cols = st.columns(5)
+st.subheader("🧮 Totales de Inventario")
+tot_cols = st.columns(6)
 tot_cols[0].metric("Total Stock", f"{prod['Stock']:.0f}")
-tot_cols[1].metric("Total Pedido", f"{prod['Total_Pedidos']:.0f}")
-tot_cols[2].metric("Total Tránsito", f"{prod['Total_Transito']:.0f}")
+tot_cols[1].metric("Total Tránsito", f"{prod['Total_Transito']:.0f}")
+tot_cols[2].metric("Total Pedido", f"{prod['Total_Pedidos']:.0f}")
 tot_cols[3].metric("Total Reservas", f"{prod['Total_Reservas']:.0f}")
 tot_cols[4].metric("Stock Disponible", f"{prod['Stock_Disponible']:.0f}")
+tot_cols[5].metric("Meses Inventario", f"{prod['Meses_Inventario']:.1f}")
 
-# --- ALERTAS (resto del código igual) ---
+# --- ALERTAS ---
 st.subheader("⚠️ Alertas de Inventario")
 alert_col1, alert_col2, alert_col3 = st.columns(3)
 
@@ -412,117 +765,212 @@ with alert_col1:
     elif prod['Stock_Disponible'] < prod['Stock_Seguridad'] * 1.5:
         st.warning(f"⚠️ Stock cerca del mínimo: {prod['Stock_Disponible']:.0f}")
     else:
-        st.success(f"✅ Stock saludable: {prod['Stock_Disponible']:.0f}")
+        st.success(f"✅ Stock adecuado: {prod['Stock_Disponible']:.0f}")
 
 with alert_col2:
-    meses_inv = prod['Meses_Inventario']
-    if meses_inv < 1:
-        st.error(f"🚨 Menos de 1 mes: {meses_inv:.1f} meses")
-    elif meses_inv > 6:
-        st.warning(f"⚠️ Sobreinventario: {meses_inv:.1f} meses")
+    ratio_cobertura = prod['Stock_Disponible'] / prod['Media_Safe'] if prod['Media_Safe'] > 0 else 999
+    if ratio_cobertura < 2:
+        st.success(f"✅ Stock saludable: {ratio_cobertura:.1f} meses")
+    elif ratio_cobertura > 4:
+        st.warning(f"⚠️ Sobreinventario: {ratio_cobertura:.1f} meses")
     else:
-        st.success(f"✅ Cobertura: {meses_inv:.1f} meses")
+        st.info(f"ℹ️ Stock normal: {ratio_cobertura:.1f} meses")
 
 with alert_col3:
-    if prod['Coef_Variacion'] > 1.0:
+    if prod['Coef_Variacion'] > 1.5:  # Umbral corregido a 150%
         st.warning(f"⚠️ Alta variabilidad: CV={prod['Coef_Variacion']*100:.0f}%")
     elif prod['Media'] < 0.1:
         st.info("ℹ️ Baja rotación")
     else:
         st.success("✅ Variabilidad normal")
 
-# --- Órdenes planificadas ---
-st.subheader("✍️ Órdenes planificadas y sugeridas (4 meses)")
-st.info(f"ℹ️ Lead Time: {lead_time} meses")
+# --- LÓGICA CORREGIDA para Órdenes Planificadas CON STOCK DE SEGURIDAD DINÁMICO ---
+st.subheader("✍️ Órdenes planificadas y sugeridas (Meses n+4 a n+7)")
+st.info(f"ℹ️ Lead Time: {lead_time} meses | Nivel de servicio: {nivel_servicio}%")
+
+# Botón para actualizar cálculos de órdenes
+col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
+with col_btn2:
+    if st.button("🔄 Actualizar Cálculos de Órdenes y Gráfico", type="primary", use_container_width=True):
+        st.session_state.recalculate_orders = True
+        st.rerun()
+
+# Si se solicita recálculo, recalcular el stock proyectado
+if st.session_state.recalculate_orders:
+    stock_proyectado = calcular_stock_proyectado_corregido(
+        sel, current_proy, current_pedidos, lead_time, prod['Stock_Disponible']
+    )
+    st.session_state.recalculate_orders = False
+    st.success("✅ Cálculos de órdenes actualizados")
+
+# Fechas para órdenes
+ultima_fecha_historica = pd.to_datetime(date_cols[-1])
+fechas_ordenes = pd.date_range(
+    start=ultima_fecha_historica + pd.DateOffset(months=4), 
+    periods=4, 
+    freq='MS'
+)
 
 orden_cols = st.columns(4)
-stock_proj = prod['Stock_Disponible']
 
 for j in range(4):
     with orden_cols[j]:
-        st.markdown(f"### 📅 Mes {j+1}")
+        mes_label = fechas_ordenes[j].strftime('%b %Y')
+        st.markdown(f"### 📅 {mes_label}")
         
-        # MOS input
-        MOS_val = st.number_input(
-            f'MOS objetivo', 
-            min_value=1.0, 
-            max_value=12.0, 
-            step=0.1, 
-            value=st.session_state['UserInputs'][sel]['MOS'][j], 
-            key=f'MOS_{sel}_{j}' # Key único
-        )
+        mes_orden = j  # n+4, n+5, n+6, n+7
+        mes_arribo = mes_orden + 4 + lead_time  # Mes real de arribo
         
-        # Sugerencias (la lógica se mantiene)
-        demanda_lead_time = sum(st.session_state['UserInputs'][sel]['Proyecciones'][j:min(j+lead_time, 12)])
-        mos_sug = max(MOS_val * prod['Media_Safe'] - stock_proj, 0)
-        dem_sug = max(demanda_lead_time - stock_proj, 0)
-        ss_sug = max(prod['Stock_Seguridad'] - stock_proj, 0)
-
-        st.metric("💡 Sugerida MOS", f"{mos_sug:.0f}")
-        st.metric("📊 Sugerida Demanda", f"{dem_sug:.0f}")
-        st.metric("🛡️ Sugerida SS", f"{ss_sug:.0f}")
-
-        # Pedido input
+        # --- CÁLCULOS CORREGIDOS SEGÚN ESPECIFICACIONES ---
+        
+        # 1. PEDIDO SUGERIDO POR MOS (FÓRMULA CORREGIDA)
+        if mes_arribo < len(stock_proyectado):
+            # Stock proyectado al momento del arribo (sin considerar este pedido)
+            stock_proyectado_arribo_sin_pedido = stock_proyectado[mes_arribo]
+            
+            # Calcular promedio de ventas de los últimos 6 meses proyectados
+            inicio_promedio = max(0, mes_arribo - 6)
+            fin_promedio = mes_arribo
+            periodo_promedio = current_proy[inicio_promedio:fin_promedio]
+            
+            if len(periodo_promedio) > 0:
+                demanda_promedio_6m = np.mean(periodo_promedio)
+            else:
+                demanda_promedio_6m = current_proy[mes_arribo] if mes_arribo < len(current_proy) else np.mean(current_proy)
+            
+            # Input de MOS objetivo
+            mos_val = st.number_input(
+                f'MOS objetivo al arribo', 
+                min_value=1.0, 
+                max_value=12.0, 
+                step=0.5, 
+                value=user_data['MOS'][j],
+                key=f'MOS_{sel}_{j}'
+            )
+            
+            # Calcular pedido sugerido para alcanzar MOS objetivo
+            stock_deseado = mos_val * demanda_promedio_6m
+            sugerido_mos = max(stock_deseado - stock_proyectado_arribo_sin_pedido, 0)
+            
+            # MOS actual proyectado (sin este pedido)
+            mos_actual_proyectado = stock_proyectado_arribo_sin_pedido / demanda_promedio_6m if demanda_promedio_6m > 0 else 999
+            
+        else:
+            sugerido_mos = 0
+            mos_val = user_data['MOS'][j]
+            mos_actual_proyectado = 0
+            demanda_promedio_6m = 0
+        
+        # 2. SUGERIDO POR STOCK DE SEGURIDAD DINÁMICO BASADO EN PROYECCIONES
+        # Usar las proyecciones de ventas para calcular SS dinámico
+        if len(current_proy) >= 6:
+            # Tomar los últimos 6 meses de proyecciones para calcular variabilidad
+            inicio_ss = max(0, len(current_proy) - 6)
+            periodo_ss = current_proy[inicio_ss:]
+            
+            if len(periodo_ss) > 1:
+                std_dinamico = np.std(periodo_ss)
+                media_dinamico = np.mean(periodo_ss)
+            else:
+                std_dinamico = prod['Desviacion']
+                media_dinamico = prod['Media']
+        else:
+            # Si no hay suficientes proyecciones, usar datos históricos
+            std_dinamico = prod['Desviacion']
+            media_dinamico = prod['Media']
+        
+        # Stock de seguridad dinámico basado en proyecciones
+        ss_dinamico = z_dict[nivel_servicio] * std_dinamico * np.sqrt(lead_time)
+        
+        # Stock proyectado al momento de la orden
+        if mes_orden + 4 < len(stock_proyectado):
+            stock_proy_orden = stock_proyectado[mes_orden + 4]
+        else:
+            stock_proy_orden = 0
+            
+        sugerido_ss = max(ss_dinamico - stock_proy_orden, 0)
+        
+        # Mostrar las dos perspectivas
+        st.metric("💡 Sugerido por MOS", f"{sugerido_mos:.0f}")
+        st.metric("🛡️ Sugerido por SS", f"{sugerido_ss:.0f}")
+        
+        # Mostrar información adicional para MOS
+        if mes_arribo < len(stock_proyectado):
+            st.info(f"**MOS actual proyectado:** {mos_actual_proyectado:.1f} meses")
+            st.info(f"**Demanda prom. 6m:** {demanda_promedio_6m:.1f}")
+        
+        # Mostrar información del SS dinámico
+        st.info(f"**SS dinámico:** {ss_dinamico:.0f} (σ={std_dinamico:.1f})")
+        
+        # Input de pedido del usuario
         plan_val = st.number_input(
             f'✏️ Orden a colocar', 
             min_value=0, 
             step=1, 
-            value=int(st.session_state['UserInputs'][sel]['Pedidos'][j]), 
-            key=f'order_{sel}_{j}' # Key único
+            value=int(user_data['Pedidos'][j]), 
+            key=f'order_{sel}_{j}'
         )
         
-        # Cálculo de stock proyectado
-        demanda_mes_actual = st.session_state['UserInputs'][sel]['Proyecciones'][j] if j < 12 else 0
-        stock_proj = stock_proj + plan_val - demanda_mes_actual
+        # Actualizar datos
+        if plan_val != user_data['Pedidos'][j]:
+            user_data['Pedidos'][j] = plan_val
+            user_data['last_update'] = datetime.now()
+            user_data['GUARDADO'] = False
         
-        if stock_proj < 0:
-            st.error(f"🚨 Stock proyectado: **{stock_proj:.0f}**")
-        elif stock_proj < prod['Stock_Seguridad']:
-            st.warning(f"⚠️ Stock proyectado: **{stock_proj:.0f}**")
+        if user_data['MOS'][j] != mos_val:
+            user_data['MOS'][j] = mos_val
+            user_data['last_update'] = datetime.now()
+            user_data['GUARDADO'] = False
+        
+        # Mostrar stocks proyectados relevantes
+        if mes_orden + 4 < len(stock_proyectado):
+            stock_proy_orden = stock_proyectado[mes_orden + 4]
         else:
-            st.success(f"✅ Stock proyectado: **{stock_proj:.0f}**")
+            stock_proy_orden = 0
+            
+        if mes_arribo < len(stock_proyectado):
+            stock_proy_arribo = stock_proyectado[mes_arribo]
+        else:
+            stock_proy_arribo = 0
+        
+        st.metric("📦 Stock Proy. al Orden", f"{stock_proy_orden:.0f}")
+        st.metric("🚚 Stock Proy. al Arribo", f"{stock_proy_arribo:.0f}")
 
+# --- Autoguardado periódico ---
+auto_save()
 
-# ----------------------------------------------------------------------
-# --- NUEVA SECCIÓN: BOTÓN GUARDAR REGISTROS ---
-# ----------------------------------------------------------------------
+# --- Estado de guardado mejorado ---
 st.markdown("---")
-st.subheader("✍️ Confirmación de Aprovisionamiento")
-col_save, col_status = st.columns([1, 2])
+st.subheader("💾 Estado de Datos")
+col_status1, col_status2, col_status3 = st.columns(3)
 
-with col_save:
-    if st.button("💾 Guardar Registros", type="primary"):
-        
-        # Sincronizar todos los inputs del producto actual con la sesión antes de guardar
-        # 1. Proyecciones (12 meses)
-        for i in range(12):
-            st.session_state['UserInputs'][sel]['Proyecciones'][i] = st.session_state[f'proj_{sel}_{i}']
-            
-        # 2. Pedidos y MOS (4 meses)
-        for j in range(4):
-            st.session_state['UserInputs'][sel]['Pedidos'][j] = st.session_state[f'order_{sel}_{j}']
-            st.session_state['UserInputs'][sel]['MOS'][j] = st.session_state[f'MOS_{sel}_{j}']
-            
-        # 3. Marcar como GUARDADO
-        st.session_state['UserInputs'][sel]['GUARDADO'] = True
-        
-        st.toast(f"✅ Registros guardados para **{sel}** por {usuario}!", icon='💾')
-        st.rerun() # Necesario para actualizar el estado visual de "Guardado"
-
-# 4. Mostrar el estado de guardado
-with col_status:
-    estado = st.session_state['UserInputs'].get(sel, {}).get('GUARDADO', False)
+with col_status1:
+    estado = user_data.get('GUARDADO', False)
     if estado:
-        st.success(f"✅ Estado: **GUARDADO** (Exportable)")
+        st.success("✅ **ESTADO: GUARDADO**")
     else:
-        st.warning(f"⚠️ Estado: **PENDIENTE DE GUARDAR** (Se exportará como 'NO REVISADO')")
+        st.warning("⚠️ **ESTADO: PENDIENTE DE GUARDAR**")
 
-st.markdown("---")
+with col_status2:
+    last_update = user_data.get('last_update')
+    if last_update:
+        if isinstance(last_update, str):
+            last_update = datetime.fromisoformat(last_update)
+        st.info(f"🕒 **Última actualización:** {last_update.strftime('%H:%M:%S')}")
 
-# --- ANÁLISIS DE COLORES (se mantiene igual) ---
+with col_status3:
+    if st.button("💾 Guardar Manualmente", type="primary", use_container_width=True):
+        if save_user_data(usuario, st.session_state.UserInputs):
+            for product in st.session_state.UserInputs:
+                st.session_state.UserInputs[product]['GUARDADO'] = True
+            st.session_state.last_save = datetime.now()
+            st.rerun()
+
+# --- ANÁLISIS DE COLORES (optimizado) ---
 if df_colores is not None:
     st.title("🎨 Análisis de Velocidad de Venta por Color")
     
+    # Mapeo de columnas para colores
     if 'MODELO' not in df_colores.columns:
         for col in ['MODELO', 'CODIGO', 'CÓDIGO', 'COD', 'Producto']:
             if col in df_colores.columns:
@@ -547,8 +995,7 @@ if df_colores is not None:
             
             total_ventas = df_colores_prod['Total'].sum() if 'Total' in df_colores_prod.columns else 0
             num_colores = len(df_colores_prod)
-            ventas_rapidas = df_colores_prod[rangos_existentes[:3]].sum().sum()
-            ventas_lentas = df_colores_prod[rangos_existentes[-3:]].sum().sum() if len(rangos_existentes) >= 3 else 0
+            ventas_rapidas = df_colores_prod[[r for r in rangos_existentes if any(x in r for x in ['0-29','30-59','60-89','90-119'])]].sum().sum()
             
             with col_summary1:
                 st.metric("Total ventas", f"{total_ventas:.0f}")
@@ -556,7 +1003,7 @@ if df_colores is not None:
                 st.metric("Colores", num_colores)
             with col_summary3:
                 pct_rapidas = (ventas_rapidas / total_ventas * 100) if total_ventas > 0 else 0
-                st.metric("Ventas rápidas (0-89)", f"{pct_rapidas:.1f}%")
+                st.metric("Ventas rápidas (0-119)", f"{pct_rapidas:.1f}%")
             
             st.subheader("📈 Distribución por color")
             
@@ -579,12 +1026,13 @@ if df_colores is not None:
             
             st.subheader("📋 Detalle por color")
             
-            df_colores_prod['Ventas_Rapidas_0-89'] = df_colores_prod[rangos_existentes[:3]].sum(axis=1)
-            df_colores_prod['Ventas_Medias_90-269'] = df_colores_prod[[r for r in rangos_existentes if any(x in r for x in ['90','120','150','180','210','240'])]].sum(axis=1)
-            df_colores_prod['Ventas_Lentas_270+'] = df_colores_prod[[r for r in rangos_existentes if any(x in r for x in ['270','300','330','360','390','420','Mayor'])]].sum(axis=1)
+            df_colores_prod['Ventas_Rapidas_0-119'] = df_colores_prod[[r for r in rangos_existentes if any(x in r for x in ['0-29','30-59','60-89','90-119'])]].sum(axis=1)
+            df_colores_prod['Ventas_Medias_120-240'] = df_colores_prod[[r for r in rangos_existentes if any(x in r for x in ['120','150','180','210','240'])]].sum(axis=1)
+            df_colores_prod['Ventas_Lentas_240+'] = df_colores_prod[[r for r in rangos_existentes if any(x in r for x in ['270','300','330','360','390','420','Mayor'])]].sum(axis=1)
             
-            df_colores_prod['% Rápidas'] = (df_colores_prod['Ventas_Rapidas_0-89'] / df_colores_prod['Total'] * 100).fillna(0)
-            df_colores_prod['% Lentas'] = (df_colores_prod['Ventas_Lentas_270+'] / df_colores_prod['Total'] * 100).fillna(0)
+            df_colores_prod['% Rápidas'] = (df_colores_prod['Ventas_Rapidas_0-119'] / df_colores_prod['Total'] * 100).fillna(0)
+            df_colores_prod['% Lentas'] = (df_colores_prod['Ventas_Lentas_240+'] / df_colores_prod['Total'] * 100).fillna(0)
+            df_colores_prod['% por Color'] = (df_colores_prod['Total'] / df_colores_prod['Total'].sum() * 100).fillna(0)
             
             dias_promedio = []
             for idx, row in df_colores_prod.iterrows():
@@ -611,24 +1059,27 @@ if df_colores is not None:
             tabla_resumen = df_colores_prod_sorted[[
                 'Sig. Color', 
                 'Total', 
-                'Ventas_Rapidas_0-89', 
-                'Ventas_Medias_90-269',
-                'Ventas_Lentas_270+',
+                '% por Color',
+                'Ventas_Rapidas_0-119', 
+                'Ventas_Medias_120-240',
+                'Ventas_Lentas_240+',
                 '% Rápidas',
                 '% Lentas',
                 'Días_Promedio_Venta'
             ]].copy()
             
+            tabla_resumen['% por Color'] = tabla_resumen['% por Color'].apply(lambda x: f"{x:.1f}%")
             tabla_resumen['% Rápidas'] = tabla_resumen['% Rápidas'].apply(lambda x: f"{x:.1f}%")
             tabla_resumen['% Lentas'] = tabla_resumen['% Lentas'].apply(lambda x: f"{x:.1f}%")
             tabla_resumen['Días_Promedio_Venta'] = tabla_resumen['Días_Promedio_Venta'].apply(lambda x: f"{x:.0f}")
             
             tabla_resumen.columns = [
                 'Color', 
-                'Total Ventas', 
-                'Ventas Rápidas (0-89)', 
-                'Ventas Medias (90-269)',
-                'Ventas Lentas (270+)',
+                'Total Ventas',
+                '% del Total',
+                'Ventas Rápidas (0-119)', 
+                'Ventas Medias (120-240)',
+                'Ventas Lentas (240+)',
                 '% Rápidas',
                 '% Lentas',
                 'Días Prom.'
@@ -646,126 +1097,62 @@ if df_colores is not None:
             with col_rec1:
                 st.success(f"**✅ Color más rápido:** {mejor_color['Sig. Color']}")
                 st.write(f"- Días promedio: {mejor_color['Días_Promedio_Venta']:.0f}")
-                st.write(f"- {mejor_color['% Rápidas']:.1f}% en < 90 días")
+                st.write(f"- {mejor_color['% Rápidas']:.1f}% en < 120 días")
                 st.write("🎯 **Acción:** Priorizar en órdenes")
             
             with col_rec2:
                 st.warning(f"**⚠️ Color más lento:** {peor_color['Sig. Color']}")
                 st.write(f"- Días promedio: {peor_color['Días_Promedio_Venta']:.0f}")
-                st.write(f"- {peor_color['% Lentas']:.1f}% después de 270 días")
+                st.write(f"- {peor_color['% Lentas']:.1f}% después de 240 días")
                 st.write("🎯 **Acción:** Reducir inventario")
-            
-            col_pie1, col_pie2 = st.columns(2)
-            
-            with col_pie1:
-                dist_velocidad = pd.DataFrame({
-                    'Categoría': ['Rápidas (0-89)', 'Medias (90-269)', 'Lentas (270+)'],
-                    'Cantidad': [
-                        df_colores_prod['Ventas_Rapidas_0-89'].sum(),
-                        df_colores_prod['Ventas_Medias_90-269'].sum(),
-                        df_colores_prod['Ventas_Lentas_270+'].sum()
-                    ]
-                })
-                fig_pie_vel = px.pie(
-                    dist_velocidad, 
-                    values='Cantidad', 
-                    names='Categoría',
-                    title='Distribución por velocidad',
-                    color='Categoría',
-                    color_discrete_map={
-                        'Rápidas (0-89)': 'green',
-                        'Medias (90-269)': 'orange',
-                        'Lentas (270+)': 'red'
-                    }
-                )
-                st.plotly_chart(fig_pie_vel, use_container_width=True)
-            
-            with col_pie2:
-                top_colores = df_colores_prod_sorted.nlargest(5, 'Total')[['Sig. Color', 'Total']]
-                fig_pie_top = px.pie(
-                    top_colores,
-                    values='Total',
-                    names='Sig. Color',
-                    title='Top 5 colores por volumen'
-                )
-                st.plotly_chart(fig_pie_top, use_container_width=True)
     
     else:
         st.info(f"ℹ️ No hay datos de colores para {sel}")
 else:
     st.info("💡 No se cargaron datos de colores")
 
-# ----------------------------------------------------------------------
-# --- EXPORTAR DATOS (LÓGICA ACTUALIZADA CON BANDERA 'GUARDADO') ---
-# ----------------------------------------------------------------------
+# --- EXPORTAR DATOS mejorado ---
 st.subheader("📥 Descargar datos ingresados")
 
-def generar_excel():
-    """Genera archivo Excel ignorando productos NO guardados si hay revisados en la misma familia."""
+def generar_excel_mejorado():
+    """Genera archivo Excel optimizado con todos los datos"""
     try:
         all_data = []
         fecha_export = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        df_familia = df[df['FAMILIA'] == selected_fam].copy()
-        productos_familia = df_familia['CODIGO'].unique().tolist()
+        for prod_name, prod_data in st.session_state.UserInputs.items():
+            # Proyecciones
+            proy_dates = pd.date_range(start=datetime.today(), periods=12, freq='MS')
+            for i, v in enumerate(prod_data.get('Proyecciones', [])):
+                all_data.append({
+                    'Producto': prod_name,
+                    'Tipo': 'Proyección',
+                    'Mes': proy_dates[i].strftime('%Y-%m'),
+                    'Valor': int(v),
+                    'MOS_Objetivo': None,
+                    'Usuario': usuario,
+                    'Fecha_Exportacion': fecha_export,
+                    'Estado_Guardado': prod_data.get('GUARDADO', False)
+                })
 
-        # --- NUEVA LÓGICA ---
-        # Detectar si la familia tiene productos guardados
-        guardados_familia = [
-            p for p in productos_familia
-            if st.session_state['UserInputs'].get(p, {}).get('GUARDADO', False)
-        ]
-
-        # Si hay al menos uno guardado, solo se exportan los guardados
-        if len(guardados_familia) > 0:
-            productos_exportar = guardados_familia
-        else:
-            productos_exportar = productos_familia
-        # ----------------------
-
-        for prod_name in productos_exportar:
-            prod_data = st.session_state['UserInputs'].get(prod_name)
-            es_guardado = prod_data is not None and prod_data.get('GUARDADO', False)
-
-            # --- Proyecciones (Solo se exportan si fue guardado) ---
-            if es_guardado:
-                vals = prod_data
-                proy_dates = pd.date_range(start=datetime.today(), periods=12, freq='MS')
-                for i, v in enumerate(vals['Proyecciones']):
-                    all_data.append({
-                        'Producto': prod_name,
-                        'Tipo': 'Proyección',
-                        'Mes': proy_dates[i].strftime('%Y-%m'),
-                        'Valor': int(v),
-                        'MOS': None,
-                        'Usuario': usuario,
-                        'Fecha_Exportacion': fecha_export
-                    })
-
-            # --- Pedidos (Aprovisionamiento) ---
+            # Pedidos
             order_dates = pd.date_range(start=datetime.today(), periods=4, freq='MS')
-            
             for j in range(4):
-                
-                if es_guardado:
-                    # El producto fue guardado, exportamos el valor numérico (0 o >0)
-                    pedido_val = int(prod_data['Pedidos'][j])
-                    mos_val = prod_data['MOS'][j]
-                else:
-                    # El producto no fue guardado, exportamos la etiqueta
-                    pedido_val = 'NO REVISADO'
-                    mos_val = 'NO REVISADO'
-                
                 all_data.append({
                     'Producto': prod_name,
                     'Tipo': 'Pedido',
-                    'Mes': order_dates[j].strftime('%Y-%m'),
-                    'Valor': pedido_val,
-                    'MOS': mos_val,
+                    'Mes_Orden': order_dates[j].strftime('%Y-%m'),
+                    'Valor': int(prod_data.get('Pedidos', [0]*4)[j]),
+                    'MOS_Objetivo': prod_data.get('MOS', [4.0]*4)[j],
                     'Usuario': usuario,
-                    'Fecha_Exportacion': fecha_export
+                    'Fecha_Exportacion': fecha_export,
+                    'Estado_Guardado': prod_data.get('GUARDADO', False)
                 })
         
+        if not all_data:
+            st.warning("No hay datos para exportar")
+            return None
+            
         export_df = pd.DataFrame(all_data)
         
         output = io.BytesIO()
@@ -792,16 +1179,30 @@ def generar_excel():
         st.error(f"Error al generar archivo: {str(e)}")
         return None
 
-excel_data = generar_excel()
+excel_data = generar_excel_mejorado()
 if excel_data:
     st.download_button(
-        label="📥 Descargar Orden (.xlsx)",
+        label="📥 Descargar Datos Completos (.xlsx)",
         data=excel_data,
-        file_name=f"Nissan_Order_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        file_name=f"Nissan_Aprovisionamiento_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True
     )
 else:
-    st.error("No se pudo generar archivo")
+    st.error("No se pudo generar archivo de exportación")
 
+# --- Footer informativo ---
 st.markdown("---")
-st.caption(f"👤 {usuario} | 📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+col_footer1, col_footer2, col_footer3 = st.columns(3)
+with col_footer1:
+    st.caption(f"👤 Usuario: {usuario}")
+with col_footer2:
+    st.caption(f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+with col_footer3:
+    st.caption("🔄 Autoguardado activo")
+
+# --- Limpieza periódica de caché ---
+if st.sidebar.button("🧹 Limpiar caché", type="secondary"):
+    st.cache_data.clear()
+    st.session_state.calculations_cache = {}
+    st.sidebar.success("Caché limpiado")
