@@ -966,6 +966,19 @@ st.info(f"**Primer arribo (n+{meses_desde_planificacion[0] + lead_time}):** {fec
 
 orden_cols = st.columns(meses_pedido)
 
+# CORRECCIÓN: Pre-calcular stock proyectado SIN cada pedido individualmente
+stocks_proyectados_sin_pedido = []
+for j in range(meses_pedido):
+    # Crear copia de pedidos sin este pedido específico
+    pedidos_sin_este = current_pedidos.copy()
+    pedidos_sin_este[j] = 0  # Eliminar solo este pedido
+    
+    # Calcular stock proyectado sin este pedido
+    stock_sin_este = calcular_stock_proyectado_corregido(
+        current_proy, pedidos_sin_este, lead_time, prod['Stock_Disponible'], origen_actual
+    )
+    stocks_proyectados_sin_pedido.append(stock_sin_este)
+
 for j in range(meses_pedido):
     with orden_cols[j]:
         mes_offset = meses_desde_planificacion[j]
@@ -981,26 +994,25 @@ for j in range(meses_pedido):
         st.info(f"**Arribo:** {fechas_arribo[j].strftime('%d %b %Y')} (n+{mes_llegada_orden})")
         
         # CÁLCULOS DE STOCK PROYECTADO CORREGIDOS
-        # stock_proyectado[0] = stock al final de n-1
-        # stock_proyectado[1] = stock al final de n
-        # stock_proyectado[2] = stock al final de n+1
-        # stock_proyectado[13] = stock al final de n+12
+        # stocks_proyectados_sin_pedido[j] = stock proyectado SIN incluir el pedido j
         
         # Stock proyectado al momento de colocar la orden: stock al final de n+3 (marzo)
+        # SIN INCLUIR ESTE PEDIDO (pero SÍ incluye pedidos anteriores)
         stock_proyectado_colocacion = 0
-        if (mes_colocacion_orden) < len(stock_proyectado):  # n+3 para orden en n+4
-            stock_proyectado_colocacion = stock_proyectado[mes_colocacion_orden]
-        elif len(stock_proyectado) > 0:
+        if mes_colocacion_orden < len(stocks_proyectados_sin_pedido[j]):
+            stock_proyectado_colocacion = stocks_proyectados_sin_pedido[j][mes_colocacion_orden]
+        elif len(stocks_proyectados_sin_pedido[j]) > 0:
             # Si excede el horizonte, usar el último valor disponible
-            stock_proyectado_colocacion = stock_proyectado[-1]
+            stock_proyectado_colocacion = stocks_proyectados_sin_pedido[j][-1]
         
         # Stock proyectado al momento de la llegada SIN considerar este pedido: stock al final de n+6 (junio)
+        # SIN INCLUIR ESTE PEDIDO, pero SÍ INCLUYE PEDIDOS ANTERIORES
         stock_proyectado_llegada_sin_pedido = 0
-        if mes_llegada_orden < len(stock_proyectado):
-            stock_proyectado_llegada_sin_pedido = stock_proyectado[mes_llegada_orden]
-        elif len(stock_proyectado) > 0:
+        if mes_llegada_orden < len(stocks_proyectados_sin_pedido[j]):
+            stock_proyectado_llegada_sin_pedido = stocks_proyectados_sin_pedido[j][mes_llegada_orden]
+        elif len(stocks_proyectados_sin_pedido[j]) > 0:
             # Si excede el horizonte, extrapolar basándose en la tendencia
-            stock_proyectado_llegada_sin_pedido = stock_proyectado[-1]
+            stock_proyectado_llegada_sin_pedido = stocks_proyectados_sin_pedido[j][-1]
         
         # Stock de seguridad dinámico para el mes de llegada
         ss_para_este_mes = prod['Stock_Seguridad_Base']
@@ -1077,16 +1089,57 @@ for j in range(meses_pedido):
             user_data['last_update'] = datetime.now()
             user_data['GUARDADO'] = False
         
-        # Mostrar stocks proyectados CORREGIDOS
-        st.metric("📦 Stock Proy. al Orden (n+3)", f"{stock_proyectado_colocacion:.0f}")
-        st.metric("🚚 Stock Proy. al Arribo (n+6)", f"{stock_proyectado_llegada_sin_pedido:.0f}")
+        # CORRECCIÓN: Mostrar stocks proyectados CON ETIQUETAS CORRECTAS
+        st.metric("📦 Stock Proy. al Orden", f"{stock_proyectado_colocacion:.0f}")
+        st.metric("🚚 Stock Proy. al Arribo", f"{stock_proyectado_llegada_sin_pedido:.0f}")
         
-        # Información adicional sobre fechas
-        with st.expander("📅 Detalles de fechas"):
-            st.write(f"**Fecha colocación orden (n+{mes_colocacion_orden}):** {fechas_ordenes[j].strftime('%d/%m/%Y')}")
-            st.write(f"**Fecha arribo pedido (n+{mes_llegada_orden}):** {fechas_arribo[j].strftime('%d/%m/%Y')}")
-            st.write(f"**Stock proyectado al orden (n+3):** {stock_proyectado_colocacion:.0f}")
-            st.write(f"**Stock proyectado al arribo sin pedido (n+6):** {stock_proyectado_llegada_sin_pedido:.0f}")
+        # Información sobre qué está incluido
+        with st.expander("📊 Detalles del cálculo"):
+            # Mostrar qué pedidos están incluidos
+            if j > 0:
+                st.write("**✅ Pedidos anteriores INCLUIDOS en el cálculo:**")
+                for k in range(j):
+                    orden_num = k + 1
+                    mes_orden = meses_desde_planificacion[k]
+                    mes_llegada = meses_desde_planificacion[k] + lead_time
+                    cantidad = current_pedidos[k]
+                    st.write(f"• **Pedido {orden_num}:** {cantidad} unidades")
+                    st.write(f"  - Se coloca: n+{mes_orden} ({fechas_ordenes[k].strftime('%b %Y')})")
+                    st.write(f"  - Llega: n+{mes_llegada} ({fechas_arribo[k].strftime('%b %Y')})")
+            else:
+                st.write("**ℹ️ No hay pedidos anteriores incluidos**")
+            
+            # Mostrar qué NO está incluido
+            st.write(f"**❌ Este pedido NO está incluido en el cálculo:**")
+            st.write(f"• **Pedido {j+1}:** {current_pedidos[j]} unidades")
+            st.write(f"  - Se coloca: n+{mes_colocacion_orden} ({fechas_ordenes[j].strftime('%b %Y')})")
+            st.write(f"  - Llega: n+{mes_llegada_orden} ({fechas_arribo[j].strftime('%b %Y')})")
+            
+            # Mostrar stock proyectado CON este pedido para comparación
+            st.write("**📈 Comparación de stocks:**")
+            if mes_colocacion_orden < len(stock_proyectado):
+                stock_con_pedido_orden = stock_proyectado[mes_colocacion_orden]
+                diferencia_orden = stock_con_pedido_orden - stock_proyectado_colocacion
+                st.write(f"• **Stock al orden CON pedido:** {stock_con_pedido_orden:.0f} (diferencia: {diferencia_orden:.0f})")
+            
+            if mes_llegada_orden < len(stock_proyectado):
+                stock_con_pedido_arribo = stock_proyectado[mes_llegada_orden]
+                diferencia_arribo = stock_con_pedido_arribo - stock_proyectado_llegada_sin_pedido
+                st.write(f"• **Stock al arribo CON pedido:** {stock_con_pedido_arribo:.0f} (diferencia: {diferencia_arribo:.0f})")
+            
+            # Mostrar detalles de fechas
+            st.write("**📅 Resumen de fechas:**")
+            st.write(f"• **Fecha colocación orden:** {fechas_ordenes[j].strftime('%d/%m/%Y')}")
+            st.write(f"• **Fecha arribo pedido:** {fechas_arribo[j].strftime('%d/%m/%Y')}")
+            st.write(f"• **Días entre orden y arribo:** {(fechas_arribo[j] - fechas_ordenes[j]).days} días")
+            
+            # Mostrar cálculo del pedido sugerido
+            st.write("**🧮 Cálculo del pedido sugerido:**")
+            st.write(f"• **MOS objetivo:** {mos_val:.1f} meses")
+            st.write(f"• **Demanda promedio 6m:** {demanda_promedio_6m:.1f}")
+            st.write(f"• **Stock deseado:** {mos_val:.1f} × {demanda_promedio_6m:.1f} = {stock_deseado:.0f}")
+            st.write(f"• **Stock proyectado sin este pedido:** {stock_proyectado_llegada_sin_pedido:.0f}")
+            st.write(f"• **Pedido sugerido:** {stock_deseado:.0f} - {stock_proyectado_llegada_sin_pedido:.0f} = {sugerido_mos:.0f}")
 
 # --- Autoguardado periódico ---
 auto_save()
