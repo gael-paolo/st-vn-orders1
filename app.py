@@ -927,67 +927,82 @@ for j in range(meses_pedido):
         st.info(f"**Timing:** Orden n+{mes_colocacion_orden} → Llega n+{mes_llegada_orden}")
         
         # CÁLCULOS DE STOCK PROYECTADO CORREGIDOS
+        # CORRECCIÓN: Usar los índices correctos basados en el timing
+        # stock_proyectado[0] = stock inicial en mes n (planificación actual)
+        # stock_proyectado[1] = mes n+1, etc.
+        
+        # Stock proyectado al momento de colocar la orden (ej: n+4 para no-NTJ)
+        stock_proyectado_colocacion = 0
+        if mes_colocacion_orden < len(stock_proyectado):
+            stock_proyectado_colocacion = stock_proyectado[mes_colocacion_orden]
+        elif len(stock_proyectado) > 0:
+            # Si excede el horizonte, usar el último valor disponible
+            stock_proyectado_colocacion = stock_proyectado[-1]
+        
+        # Stock proyectado al momento de la llegada SIN considerar este pedido (ej: n+6 para no-NTJ)
+        stock_proyectado_llegada_sin_pedido = 0
         if mes_llegada_orden < len(stock_proyectado):
-            # Stock proyectado al momento de la llegada (sin considerar este pedido)
             stock_proyectado_llegada_sin_pedido = stock_proyectado[mes_llegada_orden]
-            
-            # Stock proyectado al momento de colocar la orden
-            stock_proyectado_colocacion = stock_proyectado[mes_colocacion_orden] if mes_colocacion_orden < len(stock_proyectado) else 0
-            
-            # Stock de seguridad dinámico para el mes de llegada
-            if mes_llegada_orden - 1 < len(ss_dinamico_por_mes):
-                ss_para_este_mes = ss_dinamico_por_mes[mes_llegada_orden - 1]
-            else:
-                ss_para_este_mes = ss_dinamico_por_mes[-1] if ss_dinamico_por_mes else prod['Stock_Seguridad_Base']
-            
-            # Calcular promedio de ventas de los últimos 6 meses proyectados
-            inicio_promedio = max(0, mes_llegada_orden - 6)
-            fin_promedio = min(mes_llegada_orden, len(current_proy))
-            periodo_promedio = current_proy[inicio_promedio:fin_promedio]
-            
-            if len(periodo_promedio) > 0:
-                demanda_promedio_6m = np.mean(periodo_promedio)
-            else:
-                demanda_promedio_6m = current_proy[mes_llegada_orden - 1] if (mes_llegada_orden - 1) < len(current_proy) else np.mean(current_proy)
-            
-            # Input de MOS objetivo
-            mos_val = st.number_input(
-                f'MOS objetivo al arribo', 
-                min_value=1.0, 
-                max_value=12.0, 
-                step=0.5, 
-                value=user_data['MOS'][j],
-                key=f'MOS_{sel}_{j}'
-            )
-            
-            # Calcular pedido sugerido para alcanzar MOS objetivo
-            stock_deseado = mos_val * demanda_promedio_6m
-            sugerido_mos = max(stock_deseado - stock_proyectado_llegada_sin_pedido, 0)
-            
-            # MOS actual proyectado (sin este pedido)
-            mos_actual_proyectado = stock_proyectado_llegada_sin_pedido / demanda_promedio_6m if demanda_promedio_6m > 0 else 999
-            
-        else:
-            sugerido_mos = 0
-            mos_val = user_data['MOS'][j]
-            mos_actual_proyectado = 0
-            demanda_promedio_6m = 0
-            ss_para_este_mes = prod['Stock_Seguridad_Base']
-            stock_proyectado_colocacion = 0
-            stock_proyectado_llegada_sin_pedido = 0
+        elif len(stock_proyectado) > 0:
+            # Si excede el horizonte, extrapolar basándose en la tendencia
+            stock_proyectado_llegada_sin_pedido = stock_proyectado[-1]
+        
+        # Stock de seguridad dinámico para el mes de llegada
+        # NOTA: ss_dinamico_por_mes tiene 12 elementos (meses n+1 a n+12)
+        ss_para_este_mes = prod['Stock_Seguridad_Base']
+        if mes_llegada_orden > 0 and (mes_llegada_orden - 1) < len(ss_dinamico_por_mes):
+            ss_para_este_mes = ss_dinamico_por_mes[mes_llegada_orden - 1]
+        elif len(ss_dinamico_por_mes) > 0:
+            ss_para_este_mes = ss_dinamico_por_mes[-1]
+        
+        # Calcular promedio de ventas de los últimos 6 meses proyectados antes de la llegada
+        # Usamos mes_llegada_orden como referencia para calcular los 6 meses previos
+        inicio_promedio = max(0, mes_llegada_orden - 6)
+        fin_promedio = min(mes_llegada_orden, len(current_proy))
+        periodo_promedio = current_proy[inicio_promedio:fin_promedio]
+        
+        demanda_promedio_6m = 0
+        if len(periodo_promedio) > 0:
+            demanda_promedio_6m = np.mean(periodo_promedio)
+        elif mes_llegada_orden - 1 < len(current_proy):
+            # Si no hay 6 meses, usar el mes anterior a la llegada
+            demanda_promedio_6m = current_proy[mes_llegada_orden - 1]
+        elif len(current_proy) > 0:
+            # Si no hay datos específicos, usar el promedio general
+            demanda_promedio_6m = np.mean(current_proy)
+        
+        # Input de MOS objetivo
+        mos_val = st.number_input(
+            f'MOS objetivo al arribo', 
+            min_value=1.0, 
+            max_value=12.0, 
+            step=0.5, 
+            value=user_data['MOS'][j],
+            key=f'MOS_{sel}_{j}'
+        )
+        
+        # Calcular pedido sugerido para alcanzar MOS objetivo
+        # CORRECCIÓN: Usar stock_proyectado_llegada_sin_pedido como base
+        stock_deseado = mos_val * demanda_promedio_6m
+        sugerido_mos = max(stock_deseado - stock_proyectado_llegada_sin_pedido, 0)
+        
+        # MOS actual proyectado (sin este pedido)
+        mos_actual_proyectado = 0
+        if demanda_promedio_6m > 0:
+            mos_actual_proyectado = stock_proyectado_llegada_sin_pedido / demanda_promedio_6m
         
         # SUGERIDO POR STOCK DE SEGURIDAD DINÁMICO
-        sugerido_ss = max(ss_para_este_mes - stock_proyectado_llegada_sin_pedido, 0) if mes_llegada_orden < len(stock_proyectado) else 0
+        sugerido_ss = max(ss_para_este_mes - stock_proyectado_llegada_sin_pedido, 0)
         
         # Mostrar las dos perspectivas
         st.metric("💡 Sugerido por MOS", f"{sugerido_mos:.0f}")
         st.metric("🛡️ Sugerido por SS", f"{sugerido_ss:.0f}")
         
         # Mostrar información adicional
-        if mes_llegada_orden < len(stock_proyectado):
+        if demanda_promedio_6m > 0:
             st.info(f"**MOS actual proyectado:** {mos_actual_proyectado:.1f} meses")
             st.info(f"**Demanda prom. 6m:** {demanda_promedio_6m:.1f}")
-            st.info(f"**SS dinámico:** {ss_para_este_mes:.0f}")
+        st.info(f"**SS dinámico:** {ss_para_este_mes:.0f}")
         
         # Input de pedido del usuario
         plan_val = st.number_input(
@@ -1010,6 +1025,7 @@ for j in range(meses_pedido):
             user_data['GUARDADO'] = False
         
         # Mostrar stocks proyectados CORREGIDOS
+        # CORRECCIÓN: Estos ahora muestran los valores correctos según el timing
         st.metric("📦 Stock Proy. al Orden", f"{stock_proyectado_colocacion:.0f}")
         st.metric("🚚 Stock Proy. al Arribo", f"{stock_proyectado_llegada_sin_pedido:.0f}")
 
