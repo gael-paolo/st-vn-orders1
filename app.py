@@ -571,15 +571,15 @@ def calcular_stock_proyectado_corregido(proyecciones, pedidos_planificados, lead
     # CORRECCIÓN: Timing específico según origen
     if origen == 'NTJ':
         # NTJ: Pedido n+2, Llegada n+5
-        meses_pedido = [2, 3, 4, 5]  # Meses desde planificación para colocar órdenes
+        meses_pedido = [2, 3, 4, 5]  # Meses desde planificación para colocar órdenes (n+2 a n+5)
     else:
         # Otros orígenes: Pedido n+4, Llegada n+6  
-        meses_pedido = [4, 5, 6, 7]  # Meses desde planificación para colocar órdenes
+        meses_pedido = [4, 5, 6, 7]  # Meses desde planificación para colocar órdenes (n+4 a n+7)
     
-    # Inicializar stock proyectado (mes actual = mes 0)
+    # Inicializar stock proyectado (mes actual = mes 0 = diciembre)
     stock_proyectado = [stock_inicial]
     
-    # Para cada mes proyectado (mes 0 a mes 11 desde planificación)
+    # Para cada mes proyectado (mes 0 a mes 11 desde planificación = diciembre a noviembre)
     for mes_proyectado in range(12):
         stock_actual = stock_proyectado[-1]
         
@@ -590,7 +590,7 @@ def calcular_stock_proyectado_corregido(proyecciones, pedidos_planificados, lead
             mes_colocacion_orden = meses_pedido[i]
             
             # Mes en que llega la orden (desde planificación)
-            mes_llegada_orden = mes_colocacion_orden + lead_time - 1  # -1 porque el mes 0 es el mes actual
+            mes_llegada_orden = mes_colocacion_orden + lead_time
             
             # Si la orden llega en este mes proyectado
             if mes_llegada_orden == mes_proyectado:
@@ -618,13 +618,14 @@ def crear_visualizacion_principal_corregida(prod_codigo, proyecciones, pedidos, 
     hist_data['Fecha'] = hist_data['Fecha'] + pd.offsets.MonthEnd(0)
     
     # Fechas de proyección CORREGIDAS - ÚLTIMO DÍA DEL MES
-    ultima_fecha_ventas = pd.to_datetime(date_cols[-1])  # Última fecha histórica
+    ultima_fecha_ventas = pd.to_datetime(date_cols[-1])  # Última fecha histórica (noviembre)
     ultima_fecha_ventas = ultima_fecha_ventas + pd.offsets.MonthEnd(0)  # Ajustar al último día del mes
     
-    # Fecha de planificación es el último día del mes actual (n)
-    fecha_planificacion = ultima_fecha_ventas
+    # Fecha de planificación es el último día del mes actual (n = diciembre)
+    fecha_planificacion = ultima_fecha_ventas + pd.DateOffset(months=1)  # Diciembre (n)
+    fecha_planificacion = fecha_planificacion + pd.offsets.MonthEnd(0)  # Asegurar último día
     
-    # Generar 12 meses de proyección (n a n+11)
+    # Generar 12 meses de proyección (n a n+11 = diciembre a noviembre)
     proy_dates = []
     for i in range(12):
         # Generar fechas al último día de cada mes
@@ -640,9 +641,9 @@ def crear_visualizacion_principal_corregida(prod_codigo, proyecciones, pedidos, 
         proyecciones, pedidos, lead_time, stock_inicial, origen
     )
     
-    # stock_proyectado[0] = stock en mes n (planificación actual)
-    # stock_proyectado[1] = stock en mes n+1
-    # stock_proyectado[12] = stock en mes n+12
+    # stock_proyectado[0] = stock en mes n (diciembre)
+    # stock_proyectado[1] = stock en mes n+1 (enero)
+    # stock_proyectado[12] = stock en mes n+12 (diciembre del siguiente año)
     
     # CALCULAR STOCK DE SEGURIDAD DINÁMICO POR MES CORREGIDO
     ss_dinamico_por_mes = []
@@ -744,8 +745,10 @@ st.plotly_chart(fig_principal, use_container_width=True)
 st.subheader("✍️ Ventas proyectadas (12 meses - n a n+11)")
 
 # Calcular fechas de proyección (último día de cada mes, desde n hasta n+11)
-ultima_fecha_ventas = pd.to_datetime(date_cols[-1]) + pd.offsets.MonthEnd(0)
-fecha_planificacion = ultima_fecha_ventas  # Mes n (actual)
+# Último dato histórico es noviembre, por lo que n = diciembre
+ultima_fecha_ventas = pd.to_datetime(date_cols[-1]) + pd.offsets.MonthEnd(0)  # Noviembre
+fecha_planificacion = ultima_fecha_ventas + pd.DateOffset(months=1)  # Diciembre (n)
+fecha_planificacion = fecha_planificacion + pd.offsets.MonthEnd(0)  # Asegurar último día
 
 proy_dates = []
 for i in range(12):
@@ -762,10 +765,15 @@ for col_idx in range(4):
             if i < 12:
                 key_name = f'proj_{sel}_{i}'
                 value_current = int(user_data['Proyecciones'][i])
-                mes_label = proy_dates[i].strftime('%d %b %Y')
+                
+                # Determinar etiqueta n, n+1, etc.
+                if i == 0:
+                    mes_label = f"{proy_dates[i].strftime('%d %b %Y')} (n)"
+                else:
+                    mes_label = f"{proy_dates[i].strftime('%d %b %Y')} (n+{i})"
                 
                 val = st.number_input(
-                    f'{mes_label}', 
+                    mes_label, 
                     min_value=0, 
                     step=1, 
                     value=value_current, 
@@ -929,8 +937,9 @@ else:
     meses_desde_planificacion = [4, 5, 6, 7]  # Meses desde n (planificación actual)
 
 # Fechas para órdenes CORREGIDAS - ÚLTIMO DÍA DEL MES
-ultima_fecha_ventas = pd.to_datetime(date_cols[-1]) + pd.offsets.MonthEnd(0)  # Último día del último mes histórico
-fecha_planificacion = ultima_fecha_ventas  # Último día del mes actual de planificación (n)
+ultima_fecha_ventas = pd.to_datetime(date_cols[-1]) + pd.offsets.MonthEnd(0)  # Último día del último mes histórico (noviembre)
+fecha_planificacion = ultima_fecha_ventas + pd.DateOffset(months=1)  # Diciembre (n)
+fecha_planificacion = fecha_planificacion + pd.offsets.MonthEnd(0)  # Asegurar último día
 
 # Calcular fechas de órdenes basadas en el timing corregido (último día del mes)
 fechas_ordenes = []
@@ -955,7 +964,8 @@ orden_cols = st.columns(meses_pedido)
 
 for j in range(meses_pedido):
     with orden_cols[j]:
-        mes_label = fechas_ordenes[j].strftime('%d %b %Y')
+        mes_offset = meses_desde_planificacion[j]
+        mes_label = f"{fechas_ordenes[j].strftime('%d %b %Y')} (n+{mes_offset})"
         st.markdown(f"### 📅 {mes_label}")
         
         # CÁLCULOS CON TIMING CORREGIDO
@@ -967,19 +977,19 @@ for j in range(meses_pedido):
         st.info(f"**Arribo:** {fechas_arribo[j].strftime('%d %b %Y')}")
         
         # CÁLCULOS DE STOCK PROYECTADO CORREGIDOS
-        # stock_proyectado[0] = stock en mes n
-        # stock_proyectado[1] = stock en mes n+1
+        # stock_proyectado[0] = stock en mes n (diciembre)
+        # stock_proyectado[1] = stock en mes n+1 (enero)
         # stock_proyectado[12] = stock en mes n+12
         
-        # Stock proyectado al momento de colocar la orden (ej: n+4 para no-NTJ)
+        # Stock proyectado al momento de colocar la orden: stock al final de n+3 (marzo)
         stock_proyectado_colocacion = 0
-        if mes_colocacion_orden < len(stock_proyectado):
-            stock_proyectado_colocacion = stock_proyectado[mes_colocacion_orden]
+        if (mes_colocacion_orden - 1) < len(stock_proyectado):  # n+3 para orden en n+4
+            stock_proyectado_colocacion = stock_proyectado[mes_colocacion_orden - 1]
         elif len(stock_proyectado) > 0:
             # Si excede el horizonte, usar el último valor disponible
             stock_proyectado_colocacion = stock_proyectado[-1]
         
-        # Stock proyectado al momento de la llegada SIN considerar este pedido (ej: n+6 para no-NTJ)
+        # Stock proyectado al momento de la llegada SIN considerar este pedido: stock al final de n+6 (junio)
         stock_proyectado_llegada_sin_pedido = 0
         if mes_llegada_orden < len(stock_proyectado):
             stock_proyectado_llegada_sin_pedido = stock_proyectado[mes_llegada_orden]
@@ -995,7 +1005,8 @@ for j in range(meses_pedido):
             ss_para_este_mes = ss_dinamico_por_mes[-1]
         
         # Calcular promedio de ventas de los últimos 6 meses proyectados antes de la llegada
-        inicio_promedio = max(0, mes_llegada_orden - 5)  # Últimos 6 meses
+        # Para orden que llega en n+6, usar proyecciones de n+1 a n+6
+        inicio_promedio = max(0, mes_llegada_orden - 5)  # Últimos 6 meses (n+1 a n+6)
         fin_promedio = min(mes_llegada_orden + 1, len(current_proy))
         periodo_promedio = current_proy[inicio_promedio:fin_promedio]
         
@@ -1062,14 +1073,15 @@ for j in range(meses_pedido):
             user_data['GUARDADO'] = False
         
         # Mostrar stocks proyectados CORREGIDOS
-        st.metric("📦 Stock Proy. al Orden", f"{stock_proyectado_colocacion:.0f}")
-        st.metric("🚚 Stock Proy. al Arribo", f"{stock_proyectado_llegada_sin_pedido:.0f}")
+        st.metric("📦 Stock Proy. al Orden (n+3)", f"{stock_proyectado_colocacion:.0f}")
+        st.metric("🚚 Stock Proy. al Arribo (n+6)", f"{stock_proyectado_llegada_sin_pedido:.0f}")
         
         # Información adicional sobre fechas
         with st.expander("📅 Detalles de fechas"):
-            st.write(f"**Fecha colocación orden:** {fechas_ordenes[j].strftime('%d/%m/%Y')}")
-            st.write(f"**Fecha arribo pedido:** {fechas_arribo[j].strftime('%d/%m/%Y')}")
-            st.write(f"**Días entre orden y arribo:** {(fechas_arribo[j] - fechas_ordenes[j]).days} días")
+            st.write(f"**Fecha colocación orden (n+{mes_colocacion_orden}):** {fechas_ordenes[j].strftime('%d/%m/%Y')}")
+            st.write(f"**Fecha arribo pedido (n+{mes_llegada_orden}):** {fechas_arribo[j].strftime('%d/%m/%Y')}")
+            st.write(f"**Stock proyectado al orden (n+3):** {stock_proyectado_colocacion:.0f}")
+            st.write(f"**Stock proyectado al arribo sin pedido (n+6):** {stock_proyectado_llegada_sin_pedido:.0f}")
 
 # --- Autoguardado periódico ---
 auto_save()
