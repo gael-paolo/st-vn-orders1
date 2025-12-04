@@ -564,7 +564,7 @@ def auto_save():
                 st.session_state.UserInputs[product]['GUARDADO'] = True
             st.sidebar.success("💾 Autoguardado completado")
 
-# --- CÁLCULO DE STOCK PROYECTADO CON TIMING CORREGIDO Y FECHAS AL FINAL DE MES ---
+# --- CÁLCULO DE STOCK PROYECTADO CON TIMING CORREGIDO ---
 def calcular_stock_proyectado_corregido(proyecciones, pedidos_planificados, lead_time, stock_inicial, origen):
     """Calcula el stock proyectado con timing CORREGIDO según las especificaciones"""
     
@@ -605,34 +605,25 @@ def calcular_stock_proyectado_corregido(proyecciones, pedidos_planificados, lead
     
     return stock_proyectado
 
-# --- Visualización principal con SS dinámico CORREGIDO Y FECHAS AL FINAL DE MES ---
+# --- Visualización principal con SS dinámico CORREGIDO ---
 def crear_visualizacion_principal_corregida(prod_codigo, proyecciones, pedidos, lead_time, origen):
     """Crea la visualización principal con stock proyectado y SS dinámico CORREGIDO"""
     prod_row = df[df['CODIGO'] == prod_codigo].iloc[0]
     
-    # Datos históricos - CORRECCIÓN: Usar último día del mes
+    # Datos históricos
     hist_data = prod_row[date_cols].T.reset_index()
     hist_data.columns = ['Fecha', 'Ventas']
     hist_data['Fecha'] = pd.to_datetime(hist_data['Fecha'])
-    # Ajustar al último día del mes para datos históricos
-    hist_data['Fecha'] = hist_data['Fecha'] + pd.offsets.MonthEnd(0)
     
-    # Fechas de proyección CORREGIDAS - ÚLTIMO DÍA DEL MES
-    ultima_fecha_ventas = pd.to_datetime(date_cols[-1])  # Última fecha histórica
-    ultima_fecha_ventas = ultima_fecha_ventas + pd.offsets.MonthEnd(0)  # Ajustar al último día del mes
+    # Fechas de proyección CORREGIDAS
+    ultima_fecha_ventas = pd.to_datetime(date_cols[-1])  # Octubre
+    fecha_planificacion = ultima_fecha_ventas + pd.DateOffset(months=1)  # Noviembre
     
-    # Fecha de planificación es el último día del mes actual
-    fecha_planificacion = ultima_fecha_ventas + pd.DateOffset(months=1)  # Último día del mes siguiente
-    fecha_planificacion = fecha_planificacion + pd.offsets.MonthEnd(0)  # Asegurar que es último día
-    
-    proy_dates = []
-    for i in range(len(proyecciones)):
-        # Generar fechas al último día de cada mes
-        fecha = fecha_planificacion + pd.DateOffset(months=i+1)
-        fecha = fecha + pd.offsets.MonthEnd(0)
-        proy_dates.append(fecha)
-    
-    proy_dates = pd.DatetimeIndex(proy_dates)
+    proy_dates = pd.date_range(
+        start=fecha_planificacion, 
+        periods=len(proyecciones), 
+        freq='MS'
+    )
     
     # Calcular stock proyectado CORREGIDO
     stock_inicial = prod_row['Stock_Disponible']
@@ -661,49 +652,47 @@ def crear_visualizacion_principal_corregida(prod_codigo, proyecciones, pedidos, 
     
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     
-    # Serie histórica - CORRECCIÓN: Usar último día del mes
+    # Serie histórica
     fig.add_trace(
         go.Scatter(
             x=hist_data['Fecha'], y=hist_data['Ventas'],
             mode='lines+markers', name='Ventas Históricas',
             line=dict(color='blue', width=3),
-            marker=dict(size=6),
-            hovertemplate='Fecha: %{x|%b %Y}<br>Ventas: %{y:.0f}<extra></extra>'
+            marker=dict(size=6)
         ),
         secondary_y=False,
     )
     
-    # Proyecciones - CORRECCIÓN: Usar último día del mes
+    # Proyecciones
     fig.add_trace(
         go.Scatter(
             x=proy_dates, y=proyecciones,
             mode='lines+markers', name='Ventas Proyectadas',
             line=dict(color='orange', width=3, dash='dash'),
-            marker=dict(size=6, symbol='diamond'),
-            hovertemplate='Fecha: %{x|%b %Y}<br>Proyección: %{y:.0f}<extra></extra>'
+            marker=dict(size=6, symbol='diamond')
         ),
         secondary_y=False,
     )
     
-    # Stock proyectado - CORRECCIÓN: Usar último día del mes
+    # Stock proyectado
     fig.add_trace(
         go.Bar(
             x=proy_dates, y=stock_proyectado[1:13],  # Desde mes n+1
             name='Stock Proyectado',
             marker_color='lightgreen', opacity=0.7,
-            hovertemplate='Fecha: %{x|%b %Y}<br>Stock: %{y:.0f} unidades<extra></extra>'
+            hovertemplate='Stock: %{y:.0f} unidades<extra></extra>'
         ),
         secondary_y=True,
     )
     
-    # LÍNEA DE STOCK DE SEGURIDAD DINÁMICO POR MES - CORRECCIÓN
+    # LÍNEA DE STOCK DE SEGURIDAD DINÁMICO POR MES - CORRECCIÓN 1
     fig.add_trace(
         go.Scatter(
             x=proy_dates, y=ss_dinamico_por_mes,
             mode='lines',
             name='Stock Seguridad Dinámico',
             line=dict(color='red', width=2, dash='dot'),
-            hovertemplate='Fecha: %{x|%b %Y}<br>SS Dinámico: %{y:.0f} unidades<extra></extra>'
+            hovertemplate='SS Dinámico: %{y:.0f} unidades<extra></extra>'
         ),
         secondary_y=True,
     )
@@ -714,12 +703,7 @@ def crear_visualizacion_principal_corregida(prod_codigo, proyecciones, pedidos, 
         hovermode='x unified',
         height=500,
         showlegend=True,
-        plot_bgcolor='rgba(240,240,240,0.1)',
-        xaxis=dict(
-            tickformat='%b %Y',
-            tickmode='auto',
-            nticks=12
-        )
+        plot_bgcolor='rgba(240,240,240,0.1)'
     )
     
     fig.update_yaxes(title_text="Ventas (unidades)", secondary_y=False)
@@ -736,20 +720,8 @@ fig_principal, stock_proyectado, ss_dinamico_por_mes = crear_visualizacion_princ
 )
 st.plotly_chart(fig_principal, use_container_width=True)
 
-# --- Ventas proyectadas (12 meses) - CORRECCIÓN: Usar último día del mes ---
+# --- Ventas proyectadas (12 meses) ---
 st.subheader("✍️ Ventas proyectadas (12 meses)")
-
-# Calcular fechas de proyección (último día de cada mes)
-ultima_fecha_ventas = pd.to_datetime(date_cols[-1]) + pd.offsets.MonthEnd(0)
-fecha_planificacion = ultima_fecha_ventas + pd.DateOffset(months=1)  # Último día del mes siguiente
-fecha_planificacion = fecha_planificacion + pd.offsets.MonthEnd(0)
-
-proy_dates = []
-for i in range(12):
-    fecha = fecha_planificacion + pd.DateOffset(months=i+1)
-    fecha = fecha + pd.offsets.MonthEnd(0)
-    proy_dates.append(fecha)
-
 cols_proj = st.columns(4)
 
 for col_idx in range(4):
@@ -759,7 +731,7 @@ for col_idx in range(4):
             if i < 12:
                 key_name = f'proj_{sel}_{i}'
                 value_current = int(user_data['Proyecciones'][i])
-                mes_label = proy_dates[i].strftime('%b %Y')
+                mes_label = (pd.to_datetime(date_cols[-1]) + pd.offsets.MonthBegin() + pd.DateOffset(months=i)).strftime('%b %Y')
                 
                 val = st.number_input(
                     f'{mes_label}', 
@@ -907,7 +879,7 @@ with alert_col3:
     else:
         st.success("✅ Variabilidad normal")
 
-# --- ÓRDENES PLANIFICADAS CON TIMING CORREGIDO Y FECHAS AL FINAL DE MES ---
+# --- ÓRDENES PLANIFICADAS CON TIMING CORREGIDO ---
 st.subheader("✍️ Órdenes planificadas y sugeridas")
 st.info(f"ℹ️ Lead Time: {lead_time} meses | Nivel de servicio: {nivel_servicio}%")
 
@@ -925,35 +897,26 @@ else:
     st.success(f"🔷 **Estructura No-NTJ** - Pedidos: n+{offset_pedido} | Llegada: n+{offset_pedido + lead_time}")
     meses_desde_planificacion = [4, 5, 6, 7]  # Marzo, Abril, Mayo, Junio
 
-# Fechas para órdenes CORREGIDAS - ÚLTIMO DÍA DEL MES
-ultima_fecha_ventas = pd.to_datetime(date_cols[-1]) + pd.offsets.MonthEnd(0)  # Último día del último mes histórico
-fecha_planificacion = ultima_fecha_ventas + pd.DateOffset(months=1)  # Último día del mes actual de planificación
-fecha_planificacion = fecha_planificacion + pd.offsets.MonthEnd(0)
+# Fechas para órdenes CORREGIDAS
+ultima_fecha_ventas = pd.to_datetime(date_cols[-1])  # Octubre
+fecha_planificacion = ultima_fecha_ventas + pd.DateOffset(months=1)  # Noviembre (mes actual)
 
-# Calcular fechas de órdenes basadas en el timing corregido (último día del mes)
+# Calcular fechas de órdenes basadas en el timing corregido
 fechas_ordenes = []
 for mes_offset in meses_desde_planificacion:
     fecha_orden = fecha_planificacion + pd.DateOffset(months=mes_offset)
-    fecha_orden = fecha_orden + pd.offsets.MonthEnd(0)  # Asegurar último día del mes
-    fechas_ordenes.append(fecha_orden)
-
-# Calcular fechas de arribo (último día del mes)
-fechas_arribo = []
-for fecha_orden in fechas_ordenes:
-    fecha_arribo = fecha_orden + pd.DateOffset(months=lead_time)
-    fecha_arribo = fecha_arribo + pd.offsets.MonthEnd(0)
-    fechas_arribo.append(fecha_arribo)
+    fechas_ordenes.append(fecha_orden.replace(day=1))
 
 # Mostrar timeline CORREGIDO
-st.info(f"**Planificación actual:** {fecha_planificacion.strftime('%d %b %Y')} (n)")
-st.info(f"**Primera orden:** {fechas_ordenes[0].strftime('%d %b %Y')} (n+{meses_desde_planificacion[0]})")
-st.info(f"**Primer arribo:** {fechas_arribo[0].strftime('%d %b %Y')} (n+{meses_desde_planificacion[0] + lead_time})")
+st.info(f"**Planificación actual:** {fecha_planificacion.strftime('%b %Y')} (n)")
+st.info(f"**Primera orden:** {fechas_ordenes[0].strftime('%b %Y')} (n+{meses_desde_planificacion[0]})")
+st.info(f"**Primer arribo:** {(fechas_ordenes[0] + pd.DateOffset(months=lead_time)).strftime('%b %Y')} (n+{meses_desde_planificacion[0] + lead_time})")
 
 orden_cols = st.columns(meses_pedido)
 
 for j in range(meses_pedido):
     with orden_cols[j]:
-        mes_label = fechas_ordenes[j].strftime('%d %b %Y')
+        mes_label = fechas_ordenes[j].strftime('%b %Y')
         st.markdown(f"### 📅 {mes_label}")
         
         # CÁLCULOS CON TIMING CORREGIDO
@@ -962,7 +925,6 @@ for j in range(meses_pedido):
         
         # Mostrar información de timing CORREGIDA
         st.info(f"**Timing:** Orden n+{mes_colocacion_orden} → Llega n+{mes_llegada_orden}")
-        st.info(f"**Arribo:** {fechas_arribo[j].strftime('%d %b %Y')}")
         
         # CÁLCULOS DE STOCK PROYECTADO CORREGIDOS
         # CORRECCIÓN: Usar los índices correctos basados en el timing
@@ -1066,12 +1028,6 @@ for j in range(meses_pedido):
         # CORRECCIÓN: Estos ahora muestran los valores correctos según el timing
         st.metric("📦 Stock Proy. al Orden", f"{stock_proyectado_colocacion:.0f}")
         st.metric("🚚 Stock Proy. al Arribo", f"{stock_proyectado_llegada_sin_pedido:.0f}")
-        
-        # Información adicional sobre fechas
-        with st.expander("📅 Detalles de fechas"):
-            st.write(f"**Fecha colocación orden:** {fechas_ordenes[j].strftime('%d/%m/%Y')}")
-            st.write(f"**Fecha arribo pedido:** {fechas_arribo[j].strftime('%d/%m/%Y')}")
-            st.write(f"**Días entre orden y arribo:** {(fechas_arribo[j] - fechas_ordenes[j]).days} días")
 
 # --- Autoguardado periódico ---
 auto_save()
