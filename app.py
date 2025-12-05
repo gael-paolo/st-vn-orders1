@@ -122,7 +122,7 @@ def load_selected_user_data(selected_file):
         st.error(f"Error al cargar archivo: {str(e)}")
         return None
 
-# --- NUEVO: Función de guardado mejorada con metadatos ---
+# --- NUEVO: Función de guardado mejorada con metadatos Y campo revisado ---
 def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False):
     """Guarda los datos del usuario en GCP con metadatos mejorados"""
     try:
@@ -145,6 +145,7 @@ def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False
         
         products_count = 0
         products_with_data = 0
+        products_reviewed = 0
         
         for producto, datos in user_data.items():
             products_count += 1
@@ -166,6 +167,11 @@ def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False
             if has_data:
                 products_with_data += 1
             
+            # Contar productos revisados
+            if datos.get('REVISADO', False):
+                products_reviewed += 1
+            
+            # GUARDAR PROYECCIONES con campo revisado
             if 'Proyecciones' in datos:
                 for i, proyeccion in enumerate(datos['Proyecciones']):
                     records.append({
@@ -175,10 +181,11 @@ def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False
                         'mes': i,
                         'valor': proyeccion,
                         'mos_objetivo': None,
-                        'revisado': datos.get('REVISADO', False),
+                        'revisado': datos.get('REVISADO', False),  # GUARDAR ESTADO DE REVISIÓN
                         'fecha_actualizacion': timestamp
                     })
             
+            # GUARDAR PEDIDOS con campo revisado
             if 'Pedidos' in datos:
                 for i, (pedido, mos) in enumerate(zip(datos['Pedidos'], datos.get('MOS', [4.0]*4))):
                     records.append({
@@ -188,7 +195,7 @@ def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False
                         'mes_orden': i,
                         'valor': pedido,
                         'mos_objetivo': mos,
-                        'revisado': datos.get('REVISADO', False),
+                        'revisado': datos.get('REVISADO', False),  # GUARDAR ESTADO DE REVISIÓN
                         'fecha_actualizacion': timestamp
                     })
         
@@ -203,6 +210,7 @@ def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False
             'reviewed': 'Yes' if mark_as_reviewed else 'No',
             'total_products': str(products_count),
             'products_with_data': str(products_with_data),
+            'products_reviewed': str(products_reviewed),
             'notes': notes,
             'last_user': usuario,
             'save_timestamp': timestamp
@@ -226,7 +234,7 @@ def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False
         st.error(f"❌ Error al guardar datos en GCP: {str(e)}")
         return False
 
-# --- Función original de guardado (para compatibilidad) ---
+# --- Función original de guardado (actualizada para incluir campo revisado) ---
 def save_user_data(usuario, user_data):
     """Guarda los datos del usuario en GCP usando la API de Google Cloud Storage"""
     try:
@@ -243,11 +251,12 @@ def save_user_data(usuario, user_data):
         bucket = client.bucket(BUCKET_NAME)
         blob = bucket.blob(filename)
         
-        # Convertir datos a CSV optimizado
+        # Convertir datos a CSV optimizado (AHORA INCLUYE CAMPO REVISADO)
         records = []
         timestamp = datetime.now().isoformat()
         
         for producto, datos in user_data.items():
+            # GUARDAR PROYECCIONES
             if 'Proyecciones' in datos:
                 for i, proyeccion in enumerate(datos['Proyecciones']):
                     records.append({
@@ -257,9 +266,11 @@ def save_user_data(usuario, user_data):
                         'mes': i,
                         'valor': proyeccion,
                         'mos_objetivo': None,
+                        'revisado': datos.get('REVISADO', False),  # NUEVO: Campo revisado
                         'fecha_actualizacion': timestamp
                     })
             
+            # GUARDAR PEDIDOS
             if 'Pedidos' in datos:
                 for i, (pedido, mos) in enumerate(zip(datos['Pedidos'], datos.get('MOS', [4.0]*4))):
                     records.append({
@@ -269,6 +280,7 @@ def save_user_data(usuario, user_data):
                         'mes_orden': i,
                         'valor': pedido,
                         'mos_objetivo': mos,
+                        'revisado': datos.get('REVISADO', False),  # NUEVO: Campo revisado
                         'fecha_actualizacion': timestamp
                     })
         
@@ -468,6 +480,7 @@ if st.session_state.user_files:
                 - Usuario: {loaded_username}
                 - Revisado: {loaded_data['metadata'].get('reviewed', 'No')}
                 - Productos: {loaded_data['metadata'].get('total_products', '0')}
+                - Productos revisados: {loaded_data['metadata'].get('products_reviewed', '0')}
                 - Notas: {loaded_data['metadata'].get('notes', 'Ninguna')}
                 """)
                 
@@ -798,7 +811,7 @@ prod = df[df['CODIGO'] == sel].iloc[0]
 lead_time = int(prod['Lead_Time'])
 origen_actual = prod['ORIGEN']
 
-# --- CORRECCIÓN: Inicialización de UserInputs mejorada ---
+# --- CORREGIDO: Inicialización de UserInputs mejorada ---
 def inicializar_datos_usuario(sel, prod, date_cols, user_existing_data=None):
     """Inicializa o carga datos del usuario de manera optimizada"""
     
@@ -814,7 +827,7 @@ def inicializar_datos_usuario(sel, prod, date_cols, user_existing_data=None):
         'Pedidos': [0] * 4,
         'MOS': [4.0] * 4,
         'GUARDADO': False,
-        'REVISADO': False,
+        'REVISADO': False,  # Por defecto no revisado
         'last_update': datetime.now()
     }
     
@@ -830,16 +843,22 @@ def inicializar_datos_usuario(sel, prod, date_cols, user_existing_data=None):
                 mos_user = [4.0] * 4
                 revisado = False
                 
+                # IMPORTANTE: Verificar si existe la columna 'revisado'
+                if 'revisado' in user_prod_data.columns:
+                    # Obtener el valor de revisado (debería ser el mismo para todas las filas del producto)
+                    revisado_vals = user_prod_data['revisado'].dropna()
+                    if not revisado_vals.empty:
+                        # Convertir a booleano
+                        revisado = bool(revisado_vals.iloc[0])
+                
                 # Procesar proyecciones
                 proyecciones_data = user_prod_data[user_prod_data['tipo'] == 'proyeccion']
                 for _, row in proyecciones_data.iterrows():
                     if 0 <= row['mes'] < 12:
                         value = row['valor']
-                        # Si el valor es NaN, mantener el valor histórico
-                        if pd.isna(value):
-                            proyecciones_user[int(row['mes'])] = hist_mean
-                        else:
-                            proyecciones_user[int(row['mes'])] = value
+                        # Solo actualizar si no es NaN
+                        if not pd.isna(value):
+                            proyecciones_user[int(row['mes'])] = int(value)
                 
                 # Procesar pedidos
                 pedidos_data = user_prod_data[user_prod_data['tipo'] == 'pedido']
@@ -849,36 +868,26 @@ def inicializar_datos_usuario(sel, prod, date_cols, user_existing_data=None):
                         value = row['valor']
                         mos_value = row['mos_objetivo']
                         
-                        # Si el valor es NaN, mantener 0
-                        if pd.isna(value):
-                            pedidos_user[idx] = 0
-                        else:
-                            pedidos_user[idx] = value
+                        # Solo actualizar si no es NaN
+                        if not pd.isna(value):
+                            pedidos_user[idx] = int(value)
                         
-                        # Si MOS es NaN, mantener 4.0
-                        if pd.isna(mos_value):
-                            mos_user[idx] = 4.0
-                        else:
-                            mos_user[idx] = mos_value
-                
-                # Determinar si está revisado
-                if 'revisado' in user_prod_data.columns:
-                    revisado_vals = user_prod_data['revisado'].dropna()
-                    if not revisado_vals.empty:
-                        # Tomar el valor más común
-                        revisado = bool(revisado_vals.mode().iloc[0] if not revisado_vals.mode().empty else revisado_vals.iloc[0])
+                        if not pd.isna(mos_value):
+                            mos_user[idx] = float(mos_value)
                 
                 # Actualizar datos iniciales
                 datos_iniciales.update({
                     'Proyecciones': proyecciones_user,
                     'Pedidos': pedidos_user,
                     'MOS': mos_user,
-                    'REVISADO': revisado,
+                    'REVISADO': revisado,  # Usar el valor cargado
                     'GUARDADO': True
                 })
                 
+                st.sidebar.info(f"✅ Datos cargados para {sel} | Revisado: {'Sí' if revisado else 'No'}")
+                
         except Exception as e:
-            st.warning(f"⚠️ Error al procesar datos cargados: {e}")
+            st.warning(f"⚠️ Error al procesar datos cargados para {sel}: {e}")
             # Mantener datos iniciales por defecto
     
     # Guardar en session state
@@ -1188,9 +1197,7 @@ for col_idx in range(4):
                 value_current = int(user_data['Proyecciones'][i])
                 
                 # NUEVO: Añadir indicador visual según estado de revisión
-                label_prefix = ""
-                if not user_data.get('REVISADO', False):
-                    label_prefix = "⚠️ "
+                label_prefix = "🔴 " if not user_data.get('REVISADO', False) else "✅ "
                 
                 mes_label = f"{label_prefix}{proy_dates[i].strftime('%b %Y')} (n+{i})"
                 
@@ -1416,9 +1423,7 @@ for j in range(meses_pedido):
         mes_offset = meses_desde_planificacion[j]
         
         # NUEVO: Añadir indicador visual según estado de revisión
-        label_prefix = ""
-        if not user_data.get('REVISADO', False):
-            label_prefix = "⚠️ "
+        label_prefix = "🔴 " if not user_data.get('REVISADO', False) else "✅ "
         
         mes_label = f"{label_prefix}📅 {fechas_ordenes[j].strftime('%b %Y')} (n+{mes_offset})"
         st.markdown(f"### {mes_label}")
