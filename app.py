@@ -117,7 +117,7 @@ def save_user_data(usuario, user_data, revisado=False, comentarios=""):
                         'valor': proyeccion,
                         'mos_objetivo': None,
                         'revisado': revisado,
-                        'comentarios': comentarios,
+                        'comentarios': comentarios if comentarios else "",
                         'fecha_actualizacion': timestamp
                     })
             
@@ -131,7 +131,7 @@ def save_user_data(usuario, user_data, revisado=False, comentarios=""):
                         'valor': pedido,
                         'mos_objetivo': mos,
                         'revisado': revisado,
-                        'comentarios': comentarios,
+                        'comentarios': comentarios if comentarios else "",
                         'fecha_actualizacion': timestamp
                     })
         
@@ -154,7 +154,7 @@ def save_user_data(usuario, user_data, revisado=False, comentarios=""):
         
         # Actualizar estado de revisión en session_state
         st.session_state.current_revision_status = revisado
-        st.session_state.current_comments = comentarios
+        st.session_state.current_comments = comentarios if comentarios else ""
         
         return True
         
@@ -196,14 +196,14 @@ def load_user_data_from_file(filepath):
     try:
         client = get_gcp_client()
         if client is None:
-            return None, None, None, None
+            return None, False, "", ""
             
         bucket = client.bucket(BUCKET_NAME)
         blob = bucket.blob(filepath)
         
         # Verificar si el archivo existe
         if not blob.exists():
-            return None, None, None, None
+            return None, False, "", ""
         
         # Descargar contenido
         content = blob.download_as_text()
@@ -220,16 +220,28 @@ def load_user_data_from_file(filepath):
             
             # Verificar si hay columnas de metadatos
             if 'revisado' in df_loaded.columns:
-                revisado = df_loaded['revisado'].iloc[0]
+                # Asegurar que revisado sea booleano
+                revisado_val = df_loaded['revisado'].iloc[0]
+                if pd.isna(revisado_val):
+                    revisado = False
+                elif isinstance(revisado_val, str):
+                    revisado = revisado_val.lower() in ['true', '1', 'yes', 'si', 'sí', 'verdadero']
+                else:
+                    revisado = bool(revisado_val)
+            
             if 'comentarios' in df_loaded.columns:
-                comentarios = df_loaded['comentarios'].iloc[0]
+                comentarios_val = df_loaded['comentarios'].iloc[0]
+                if pd.isna(comentarios_val):
+                    comentarios = ""
+                else:
+                    comentarios = str(comentarios_val)
         
         st.sidebar.success(f"✅ Datos cargados desde archivo: {filepath.split('/')[-1]}")
         return df_loaded, revisado, comentarios, usuario
         
     except Exception as e:
         st.sidebar.error(f"❌ Error al cargar archivo: {str(e)}")
-        return None, None, None, None
+        return None, False, "", ""
 
 # --- Configuración optimizada para cargar datos base desde GCP usando la API ---
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -372,7 +384,7 @@ try:
                                 # Limpiar estado actual
                                 st.session_state.UserInputs = {}
                                 st.session_state.current_revision_status = revisado
-                                st.session_state.current_comments = comentarios
+                                st.session_state.current_comments = comentarios if comentarios else ""
                                 st.session_state.loaded_from_file = True
                                 st.session_state.original_username = usuario_original
                                 st.session_state.data_loaded = False  # Forzar recarga de datos de usuario
@@ -409,7 +421,7 @@ try:
                                         'MOS': mos,
                                         'GUARDADO': True,
                                         'REVISADO': revisado,
-                                        'COMENTARIOS': comentarios,
+                                        'COMENTARIOS': comentarios if comentarios else "",
                                         'last_update': datetime.now()
                                     }
                                 
@@ -421,11 +433,18 @@ except Exception as e:
 # --- Usuario y carga de datos optimizada ---
 usuario = st.sidebar.text_input("Nombre de usuario", value="Usuario")
 
-# Si cargamos desde archivo, mostrar el usuario original
+# Si cargamos desde archivo, mostrar el usuario original - CORRECCIÓN DEL ERROR
 if st.session_state.loaded_from_file and st.session_state.original_username:
     st.sidebar.info(f"📋 Archivo original de: {st.session_state.original_username}")
-    if st.session_state.current_comments:
-        st.sidebar.info(f"💬 Comentarios: {st.session_state.current_comments[:50]}..." if len(st.session_state.current_comments) > 50 else f"💬 Comentarios: {st.session_state.current_comments}")
+    # CORRECCIÓN: Verificar que current_comments sea un string válido
+    if st.session_state.current_comments and isinstance(st.session_state.current_comments, str) and st.session_state.current_comments.strip():
+        comentarios_texto = st.session_state.current_comments.strip()
+        if len(comentarios_texto) > 50:
+            st.sidebar.info(f"💬 Comentarios: {comentarios_texto[:50]}...")
+        else:
+            st.sidebar.info(f"💬 Comentarios: {comentarios_texto}")
+    else:
+        st.sidebar.info("💬 Sin comentarios")
 
 # Cargar datos existentes del usuario solo si es necesario y no cargamos desde archivo
 if not st.session_state.data_loaded and not st.session_state.loaded_from_file:
@@ -754,10 +773,11 @@ with col_rev3:
             prod['REVISADO'] = False
         st.rerun()
 
-# Campo para comentarios
+# Campo para comentarios - CORRECCIÓN DEL ERROR
+comentarios_valor = st.session_state.current_comments if st.session_state.current_comments else ""
 comentarios = st.text_area(
     "💬 Comentarios o notas sobre este producto:",
-    value=st.session_state.current_comments,
+    value=comentarios_valor,
     height=100,
     help="Agrega comentarios sobre decisiones tomadas, observaciones o justificaciones"
 )
@@ -787,7 +807,7 @@ def inicializar_datos_usuario(sel, prod, date_cols, user_existing_data=None):
         'MOS': [None] * 4,           # CAMBIO: None en lugar de 4.0
         'GUARDADO': False,
         'REVISADO': st.session_state.current_revision_status,
-        'COMENTARIOS': st.session_state.current_comments,
+        'COMENTARIOS': st.session_state.current_comments if st.session_state.current_comments else "",
         'last_update': datetime.now()
     }
     
@@ -828,7 +848,7 @@ user_data = inicializar_datos_usuario(sel, prod, date_cols, user_existing_data)
 if 'REVISADO' in user_data:
     st.session_state.current_revision_status = user_data['REVISADO']
 if 'COMENTARIOS' in user_data:
-    st.session_state.current_comments = user_data['COMENTARIOS']
+    st.session_state.current_comments = user_data['COMENTARIOS'] if user_data['COMENTARIOS'] else ""
 
 # --- Función de autoguardado mejorada ---
 def auto_save():
@@ -847,7 +867,7 @@ def auto_save():
             for product in st.session_state.UserInputs:
                 st.session_state.UserInputs[product]['GUARDADO'] = True
                 st.session_state.UserInputs[product]['REVISADO'] = st.session_state.current_revision_status
-                st.session_state.UserInputs[product]['COMENTARIOS'] = st.session_state.current_comments
+                st.session_state.UserInputs[product]['COMENTARIOS'] = st.session_state.current_comments if st.session_state.current_comments else ""
             st.sidebar.success("💾 Autoguardado completado")
 
 # --- CÁLCULO DE STOCK PROYECTADO CON TIMING CORREGIDO ---
@@ -1627,7 +1647,7 @@ with col_status3:
                 for product in st.session_state.UserInputs:
                     st.session_state.UserInputs[product]['GUARDADO'] = True
                     st.session_state.UserInputs[product]['REVISADO'] = st.session_state.current_revision_status
-                    st.session_state.UserInputs[product]['COMENTARIOS'] = st.session_state.current_comments
+                    st.session_state.UserInputs[product]['COMENTARIOS'] = st.session_state.current_comments if st.session_state.current_comments else ""
                 st.session_state.last_save = datetime.now()
                 st.rerun()
     
@@ -1862,7 +1882,7 @@ def generar_excel_mejorado():
                     'Valor': v if v is not None else None,  # Mantener None
                     'MOS_Objetivo': None,
                     'Revisado': prod_data.get('REVISADO', False),
-                    'Comentarios': prod_data.get('COMENTARIOS', ''),
+                    'Comentarios': prod_data.get('COMENTARIOS', '') if prod_data.get('COMENTARIOS') else "",
                     'Usuario': usuario,
                     'Fecha_Exportacion': fecha_export,
                     'Estado_Guardado': prod_data.get('GUARDADO', False)
@@ -1878,7 +1898,7 @@ def generar_excel_mejorado():
                     'Valor': prod_data.get('Pedidos', [None]*4)[j],
                     'MOS_Objetivo': prod_data.get('MOS', [None]*4)[j],
                     'Revisado': prod_data.get('REVISADO', False),
-                    'Comentarios': prod_data.get('COMENTARIOS', ''),
+                    'Comentarios': prod_data.get('COMENTARIOS', '') if prod_data.get('COMENTARIOS') else "",
                     'Usuario': usuario,
                     'Fecha_Exportacion': fecha_export,
                     'Estado_Guardado': prod_data.get('GUARDADO', False)
