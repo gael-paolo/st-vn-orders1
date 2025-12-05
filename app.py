@@ -17,6 +17,41 @@ warnings.filterwarnings('ignore')
 st.set_page_config(page_title="🚗 Análisis de Aprovisionamiento de Vehículos Nissan", layout="wide")
 st.title("🚗 Análisis de Aprovisionamiento de Vehículos Nissan")
 
+# --- FUNCIONES AUXILIARES PARA CONVERSIÓN SEGURA ---
+def safe_int_conversion(value, default=0):
+    """Convierte de forma segura cualquier valor a entero"""
+    if value is None:
+        return default
+    elif isinstance(value, (int, float)):
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return default
+    elif isinstance(value, str):
+        try:
+            return int(float(value))
+        except (ValueError, TypeError):
+            return default
+    else:
+        return default
+
+def safe_float_conversion(value, default=0.0):
+    """Convierte de forma segura cualquier valor a float"""
+    if value is None:
+        return default
+    elif isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+    elif isinstance(value, str):
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+    else:
+        return default
+
 # --- Configuración de Google Cloud Storage con autenticación por JSON ---
 def get_gcp_client():
     """Inicializa el cliente de Google Cloud Storage con credenciales desde secrets"""
@@ -946,9 +981,9 @@ def crear_visualizacion_principal_corregida(prod_codigo, proyecciones, pedidos, 
     # Calcular stock proyectado CORREGIDO
     stock_inicial = prod_row['Stock_Disponible']  # Stock al final de n-1 (noviembre)
     
-    # Reemplazar None por 0 para cálculos
-    proyecciones_calc = [0 if p is None else p for p in proyecciones]
-    pedidos_calc = [0 if p is None else p for p in pedidos]
+    # Reemplazar None por 0 para cálculos usando conversión segura
+    proyecciones_calc = [safe_int_conversion(p, 0) for p in proyecciones]
+    pedidos_calc = [safe_int_conversion(p, 0) for p in pedidos]
     
     stock_proyectado = calcular_stock_proyectado_corregido(
         proyecciones_calc, pedidos_calc, lead_time, stock_inicial, origen
@@ -1144,14 +1179,11 @@ for col_idx in range(4):
                 key_name = f'proj_{sel}_{i}'
                 value_current = user_data['Proyecciones'][i]
                 
-                # CAMBIO: Permitir valores vacíos (None)
+                # USAR CONVERSIÓN SEGURA
                 mes_label = f"{proy_dates[i].strftime('%b %Y')} (n+{i})"
                 
-                # Crear un número de entrada que permita vacíos
-                if value_current is None:
-                    value_display = 0
-                else:
-                    value_display = int(value_current)
+                # Usar conversión segura en lugar de int() directo
+                value_display = safe_int_conversion(value_current, 0)
                 
                 val = st.number_input(
                     mes_label, 
@@ -1376,9 +1408,9 @@ for j in range(meses_pedido):
     pedidos_sin_este = current_pedidos.copy()
     pedidos_sin_este[j] = 0  # Eliminar solo este pedido (0 para cálculo)
     
-    # Reemplazar None por 0 para cálculos
-    pedidos_sin_este_calc = [0 if p is None else p for p in pedidos_sin_este]
-    proyecciones_calc = [0 if p is None else p for p in current_proy]
+    # Reemplazar None por 0 para cálculos usando conversión segura
+    pedidos_sin_este_calc = [safe_int_conversion(p, 0) for p in pedidos_sin_este]
+    proyecciones_calc = [safe_int_conversion(p, 0) for p in current_proy]
     
     # Calcular stock proyectado sin este pedido
     stock_sin_este = calcular_stock_proyectado_corregido(
@@ -1387,8 +1419,8 @@ for j in range(meses_pedido):
     stocks_proyectados_sin_pedido.append(stock_sin_este)
 
 # Calcular stock proyectado CON todos los pedidos
-pedidos_calc = [0 if p is None else p for p in current_pedidos]
-proyecciones_calc = [0 if p is None else p for p in current_proy]
+pedidos_calc = [safe_int_conversion(p, 0) for p in current_pedidos]
+proyecciones_calc = [safe_int_conversion(p, 0) for p in current_proy]
 
 stock_proyectado_con_todos = calcular_stock_proyectado_corregido(
     proyecciones_calc, pedidos_calc, lead_time, prod['Stock_Disponible'], origen_actual
@@ -1469,12 +1501,9 @@ for j in range(meses_pedido):
         if demanda_promedio_3m > 0:
             mos_proyectado_mes_siguiente_con_orden = stock_proyectado_mes_siguiente_con_pedido / demanda_promedio_3m
         
-        # Input de MOS objetivo (permite None/0 para indicar no revisado)
+        # Input de MOS objetivo (permite None/0 para indicar no revisado) - USAR CONVERSIÓN SEGURA
         current_mos_val = user_data['MOS'][j]
-        if current_mos_val is None:
-            mos_display = 0.0
-        else:
-            mos_display = current_mos_val
+        mos_display = safe_float_conversion(current_mos_val, 0.0)
         
         mos_val_input = st.number_input(
             f'MOS objetivo al arribo', 
@@ -1516,12 +1545,9 @@ for j in range(meses_pedido):
         
         st.info(f"**🛡️ SS dinámico (mes siguiente):** {ss_para_mes_siguiente:.0f}")
         
-        # Input de pedido del usuario (permite None/0)
+        # Input de pedido del usuario (permite None/0) - USAR CONVERSIÓN SEGURA
         current_pedido_val = user_data['Pedidos'][j]
-        if current_pedido_val is None:
-            pedido_display = 0
-        else:
-            pedido_display = int(current_pedido_val)
+        pedido_display = safe_int_conversion(current_pedido_val, 0)
         
         plan_val = st.number_input(
             f'✏️ Orden a colocar', 
