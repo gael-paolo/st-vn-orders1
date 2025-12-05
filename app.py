@@ -352,7 +352,7 @@ if validation_issues:
         for issue in validation_issues:
             st.write(issue)
 
-num_months = st.sidebar.slider("Cantidad de meses a mostrar", 6, len(date_cols), min(12, len(date_cols)))
+num_months = st.sidebar.slider("Cantidad de meses a mostrar", 3, len(date_cols), min(12, len(date_cols)))
 date_cols = date_cols[-num_months:]
 
 # --- Lead time y nivel de servicio ---
