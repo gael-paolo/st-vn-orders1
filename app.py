@@ -162,19 +162,48 @@ def save_user_data(usuario, user_data, revisado=False, comentarios=""):
         st.error(f"❌ Error al guardar datos en GCP: {str(e)}")
         return False
 
+def load_user_data(usuario):
+    """Carga los datos del usuario desde GCP usando la API de Google Cloud Storage"""
+    try:
+        if not usuario or usuario == "Usuario":
+            return None
+            
+        client = get_gcp_client()
+        if client is None:
+            return None
+            
+        filename = get_user_filename(usuario)
+        bucket = client.bucket(BUCKET_NAME)
+        blob = bucket.blob(filename)
+        
+        # Verificar si el archivo existe
+        if not blob.exists():
+            return None
+        
+        # Descargar contenido
+        content = blob.download_as_text()
+        df_loaded = pd.read_csv(io.StringIO(content))
+        
+        st.sidebar.success("✅ Datos de usuario cargados desde GCP")
+        return df_loaded
+        
+    except Exception as e:
+        st.sidebar.info(f"ℹ️ No se encontraron datos previos del usuario: {str(e)}")
+        return None
+
 def load_user_data_from_file(filepath):
     """Carga los datos del usuario desde un archivo específico en GCP"""
     try:
         client = get_gcp_client()
         if client is None:
-            return None, None, None
+            return None, None, None, None
             
         bucket = client.bucket(BUCKET_NAME)
         blob = bucket.blob(filepath)
         
         # Verificar si el archivo existe
         if not blob.exists():
-            return None, None, None
+            return None, None, None, None
         
         # Descargar contenido
         content = blob.download_as_text()
@@ -395,7 +424,8 @@ usuario = st.sidebar.text_input("Nombre de usuario", value="Usuario")
 # Si cargamos desde archivo, mostrar el usuario original
 if st.session_state.loaded_from_file and st.session_state.original_username:
     st.sidebar.info(f"📋 Archivo original de: {st.session_state.original_username}")
-    st.sidebar.info(f"💬 Comentarios: {st.session_state.current_comments[:50]}..." if st.session_state.current_comments else "💬 Sin comentarios")
+    if st.session_state.current_comments:
+        st.sidebar.info(f"💬 Comentarios: {st.session_state.current_comments[:50]}..." if len(st.session_state.current_comments) > 50 else f"💬 Comentarios: {st.session_state.current_comments}")
 
 # Cargar datos existentes del usuario solo si es necesario y no cargamos desde archivo
 if not st.session_state.data_loaded and not st.session_state.loaded_from_file:
@@ -710,12 +740,18 @@ with col_rev2:
     # Botón para marcar como revisado
     if st.button("✅ Marcar como revisado", type="secondary"):
         st.session_state.current_revision_status = True
+        # Actualizar en todos los productos
+        for prod in st.session_state.UserInputs.values():
+            prod['REVISADO'] = True
         st.rerun()
 
 with col_rev3:
     # Botón para marcar como pendiente
     if st.button("🔄 Marcar como pendiente", type="secondary"):
         st.session_state.current_revision_status = False
+        # Actualizar en todos los productos
+        for prod in st.session_state.UserInputs.values():
+            prod['REVISADO'] = False
         st.rerun()
 
 # Campo para comentarios
@@ -744,11 +780,9 @@ def inicializar_datos_usuario(sel, prod, date_cols, user_existing_data=None):
     if sel in st.session_state.UserInputs:
         return st.session_state.UserInputs[sel]
     
-    hist_mean = int(prod[date_cols].mean()) if not np.isnan(prod[date_cols].mean()) else 0
-    
     # Intentar cargar datos guardados
     datos_iniciales = {
-        'Proyecciones': [None] * 12,  # CAMBIO: None en lugar de hist_mean
+        'Proyecciones': [None] * 12,  # CAMBIO: None en lugar de valores por defecto
         'Pedidos': [None] * 4,       # CAMBIO: None en lugar de 0
         'MOS': [None] * 4,           # CAMBIO: None en lugar de 4.0
         'GUARDADO': False,
