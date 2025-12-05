@@ -43,8 +43,88 @@ def get_user_filename(usuario):
     safe_username = re.sub(r'[^a-zA-Z0-9_]', '_', usuario)
     return f"nissan/orders/users/{current_month}_{safe_username}.csv"
 
-def save_user_data(usuario, user_data):
-    """Guarda los datos del usuario en GCP usando la API de Google Cloud Storage"""
+# --- Funciones para listar y cargar archivos disponibles ---
+def list_user_files():
+    """Lista todos los archivos de usuarios disponibles en el bucket"""
+    try:
+        client = get_gcp_client()
+        if client is None:
+            return []
+        
+        bucket = client.bucket(BUCKET_NAME)
+        blobs = bucket.list_blobs(prefix="nissan/orders/users/")
+        
+        files = []
+        for blob in blobs:
+            if blob.name.endswith('.csv') and 'users' in blob.name:
+                # Extraer información del nombre del archivo
+                filename = blob.name.split('/')[-1]
+                parts = filename.replace('.csv', '').split('_')
+                
+                if len(parts) >= 3:
+                    month_year = f"{parts[0]}_{parts[1]}"
+                    username = '_'.join(parts[2:]) if len(parts) > 2 else parts[2]
+                    
+                    # Obtener metadatos
+                    blob.reload()
+                    metadata = blob.metadata or {}
+                    
+                    files.append({
+                        'filename': blob.name,
+                        'display_name': f"{username} ({month_year})",
+                        'username': username,
+                        'month_year': month_year,
+                        'last_modified': blob.updated,
+                        'size': blob.size,
+                        'reviewed': metadata.get('reviewed', 'No'),
+                        'total_products': metadata.get('total_products', '0'),
+                        'products_with_data': metadata.get('products_with_data', '0'),
+                        'notes': metadata.get('notes', '')
+                    })
+        
+        # Ordenar por fecha de modificación (más reciente primero)
+        files.sort(key=lambda x: x['last_modified'], reverse=True)
+        return files
+        
+    except Exception as e:
+        st.sidebar.error(f"Error al listar archivos: {str(e)}")
+        return []
+
+def load_selected_user_data(selected_file):
+    """Carga los datos de un archivo de usuario específico"""
+    try:
+        client = get_gcp_client()
+        if client is None:
+            return None
+        
+        bucket = client.bucket(BUCKET_NAME)
+        blob = bucket.blob(selected_file)
+        
+        if not blob.exists():
+            st.error("El archivo seleccionado no existe")
+            return None
+        
+        # Descargar contenido
+        content = blob.download_as_text()
+        df_loaded = pd.read_csv(io.StringIO(content))
+        
+        # Obtener metadatos
+        blob.reload()
+        metadata = blob.metadata or {}
+        
+        return {
+            'data': df_loaded,
+            'metadata': metadata,
+            'filename': selected_file,
+            'last_modified': blob.updated
+        }
+        
+    except Exception as e:
+        st.error(f"Error al cargar archivo: {str(e)}")
+        return None
+
+def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False):
+    """Guarda los datos del usuario en GCP con metadatos mejorados"""
     try:
         if not usuario or usuario == "Usuario":
             st.warning("⚠️ Nombre de usuario no válido para guardar")
@@ -63,28 +143,63 @@ def save_user_data(usuario, user_data):
         records = []
         timestamp = datetime.now().isoformat()
         
+        products_count = 0
+        products_with_data = 0
+        products_reviewed = 0
+        
         for producto, datos in user_data.items():
+            products_count += 1
+            
+            # Contar productos con datos (no solo ceros)
+            has_data = False
+            if 'Proyecciones' in datos:
+                for proyeccion in datos['Proyecciones']:
+                    if proyeccion > 0:
+                        has_data = True
+                        break
+            
+            if 'Pedidos' in datos:
+                for pedido in datos['Pedidos']:
+                    if pedido > 0:
+                        has_data = True
+                        break
+            
+            if has_data:
+                products_with_data += 1
+            
+            if datos.get('REVISADO', False):
+                products_reviewed += 1
+            
             if 'Proyecciones' in datos:
                 for i, proyeccion in enumerate(datos['Proyecciones']):
+                    # Guardar como NaN si es 0 y no ha sido revisado
+                    value_to_save = proyeccion if (proyeccion > 0 or datos.get('REVISADO', False)) else np.nan
+                    
                     records.append({
                         'usuario': usuario,
                         'producto': producto,
                         'tipo': 'proyeccion',
                         'mes': i,
-                        'valor': proyeccion,
+                        'valor': value_to_save,
                         'mos_objetivo': None,
+                        'revisado': datos.get('REVISADO', False),
                         'fecha_actualizacion': timestamp
                     })
             
             if 'Pedidos' in datos:
-                for i, (pedido, mos) in enumerate(zip(datos['Pedidos'], datos.get('MOS', [4.0]*4))):
+                for i, (pedido, mos) in enumerate(zip(datos['Pedidos'], datos.get('MOS', [np.nan]*4))):
+                    # Guardar como NaN si es 0 y no ha sido revisado
+                    value_to_save = pedido if (pedido > 0 or datos.get('REVISADO', False)) else np.nan
+                    mos_to_save = mos if (not pd.isna(mos) or datos.get('REVISADO', False)) else np.nan
+                    
                     records.append({
                         'usuario': usuario,
                         'producto': producto,
                         'tipo': 'pedido',
                         'mes_orden': i,
-                        'valor': pedido,
-                        'mos_objetivo': mos,
+                        'valor': value_to_save,
+                        'mos_objetivo': mos_to_save,
+                        'revisado': datos.get('REVISADO', False),
                         'fecha_actualizacion': timestamp
                     })
         
@@ -94,12 +209,24 @@ def save_user_data(usuario, user_data):
             
         df_save = pd.DataFrame(records)
         
-        # Convertir a CSV en memoria
+        # Configurar metadatos
+        metadata = {
+            'reviewed': 'Yes' if mark_as_reviewed else 'No',
+            'total_products': str(products_count),
+            'products_with_data': str(products_with_data),
+            'products_reviewed': str(products_reviewed),
+            'notes': notes,
+            'last_user': usuario,
+            'save_timestamp': timestamp
+        }
+        
+        # Convertir a CSV en memoria (manteniendo NaN como vacío)
         csv_buffer = io.StringIO()
-        df_save.to_csv(csv_buffer, index=False)
+        df_save.to_csv(csv_buffer, index=False, na_rep='')
         csv_content = csv_buffer.getvalue()
         
-        # Subir a GCP
+        # Subir a GCP con metadatos
+        blob.metadata = metadata
         blob.upload_from_string(csv_content, content_type='text/csv')
         
         st.success(f"💾 Datos guardados exitosamente para {usuario}")
@@ -110,6 +237,10 @@ def save_user_data(usuario, user_data):
     except Exception as e:
         st.error(f"❌ Error al guardar datos en GCP: {str(e)}")
         return False
+
+def save_user_data(usuario, user_data):
+    """Función de compatibilidad - llama a la versión mejorada"""
+    return save_user_data_enhanced(usuario, user_data, "", False)
 
 def load_user_data(usuario):
     """Carga los datos del usuario desde GCP usando la API de Google Cloud Storage"""
@@ -205,15 +336,101 @@ def initialize_session_state():
         st.session_state.product_key = 0
     if 'force_recalculate' not in st.session_state:
         st.session_state.force_recalculate = False
+    if 'user_files' not in st.session_state:
+        st.session_state.user_files = []
+    if 'loaded_external_data' not in st.session_state:
+        st.session_state.loaded_external_data = None
+    if 'username' not in st.session_state:
+        st.session_state.username = "Usuario"
 
 initialize_session_state()
 
+# --- Selección de archivos existentes en Sidebar ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("📂 Cargar trabajo existente")
+
+if st.sidebar.button("🔄 Actualizar lista de archivos"):
+    st.session_state.user_files = list_user_files()
+    st.rerun()
+
+# Cargar lista de archivos si no está cargada
+if not st.session_state.user_files:
+    st.session_state.user_files = list_user_files()
+
+# Mostrar selector de archivos si hay archivos disponibles
+if st.session_state.user_files:
+    # Crear opciones para el dropdown
+    file_options = []
+    for file_info in st.session_state.user_files:
+        status_icon = "✅" if file_info['reviewed'] == 'Yes' else "⏳"
+        display_text = f"{status_icon} {file_info['display_name']} - {file_info['last_modified'].strftime('%d/%m/%Y %H:%M')}"
+        file_options.append((display_text, file_info['filename']))
+    
+    # Selector de archivos
+    selected_file_display = st.sidebar.selectbox(
+        "Seleccionar archivo para cargar",
+        options=[opt[0] for opt in file_options],
+        index=0,
+        key="file_selector"
+    )
+    
+    # Encontrar el filename correspondiente
+    selected_filename = None
+    for display_text, filename in file_options:
+        if display_text == selected_file_display:
+            selected_filename = filename
+            break
+    
+    # Botón para cargar el archivo seleccionado
+    if selected_filename and st.sidebar.button("📥 Cargar este trabajo", type="primary"):
+        with st.spinner(f"Cargando datos de {selected_filename}..."):
+            loaded_data = load_selected_user_data(selected_filename)
+            
+            if loaded_data:
+                # Extraer el username del filename
+                filename_parts = selected_filename.split('/')[-1].replace('.csv', '').split('_')
+                loaded_username = '_'.join(filename_parts[2:]) if len(filename_parts) > 2 else filename_parts[2]
+                
+                # Actualizar el nombre de usuario
+                st.session_state.username = loaded_username
+                
+                # Guardar los datos cargados
+                st.session_state.loaded_external_data = loaded_data['data']
+                
+                # Resetear UserInputs
+                st.session_state.UserInputs = {}
+                st.session_state.data_loaded = False
+                st.session_state.current_product_index = 0
+                st.session_state.product_key += 1
+                
+                # Mostrar información del archivo
+                st.sidebar.success(f"✅ Datos cargados exitosamente")
+                st.sidebar.info(f"""
+                **Información del archivo:**
+                - Usuario: {loaded_username}
+                - Revisado: {loaded_data['metadata'].get('reviewed', 'No')}
+                - Productos: {loaded_data['metadata'].get('total_products', '0')}
+                - Productos con datos: {loaded_data['metadata'].get('products_with_data', '0')}
+                - Notas: {loaded_data['metadata'].get('notes', 'Ninguna')}
+                """)
+                
+                st.rerun()
+else:
+    st.sidebar.info("No se encontraron archivos guardados")
+
 # --- Usuario y carga de datos optimizada ---
-usuario = st.sidebar.text_input("Nombre de usuario", value="Usuario")
+usuario = st.sidebar.text_input("Nombre de usuario", value=st.session_state.username)
 
 # Cargar datos existentes del usuario solo si es necesario
 if not st.session_state.data_loaded:
-    user_existing_data = load_user_data(usuario)
+    # Primero intentar con datos cargados externamente
+    if st.session_state.loaded_external_data is not None:
+        user_existing_data = st.session_state.loaded_external_data
+        st.sidebar.success("✅ Datos cargados desde archivo seleccionado")
+    else:
+        # Si no hay datos externos, cargar los del usuario actual
+        user_existing_data = load_user_data(usuario)
+    
     st.session_state.data_loaded = True
 else:
     user_existing_data = None
@@ -227,7 +444,7 @@ URL_ORDERS = "https://storage.googleapis.com/bk_vn/nissan/orders/vn_nissan_order
 URL_COLORS = "https://storage.googleapis.com/bk_vn/nissan/orders/vn_nissan_colors.csv"
 
 # Botón de recarga
-if st.sidebar.button("🔄 Recargar datos"):
+if st.sidebar.button("🔄 Recargar datos base"):
     st.cache_data.clear()
     st.session_state.data_loaded = False
     st.session_state.calculations_cache = {}
@@ -352,7 +569,7 @@ if validation_issues:
         for issue in validation_issues:
             st.write(issue)
 
-num_months = st.sidebar.slider("Cantidad de meses a mostrar", 6, len(date_cols), min(12, len(date_cols)))
+num_months = st.sidebar.slider("Cantidad de meses a mostrar", 3, len(date_cols), min(12, len(date_cols)))
 date_cols = date_cols[-num_months:]
 
 # --- Lead time y nivel de servicio ---
@@ -442,14 +659,14 @@ estrats_all = ['Todas'] + sorted(df['ESTRAT'].dropna().unique().tolist())
 selected_fam = st.sidebar.selectbox(
     "Selecciona familia", 
     familias, 
-    index=familias.index(st.session_state.selected_family),
+    index=familias.index(st.session_state.selected_family) if st.session_state.selected_family in familias else 0,
     key="family_selector"
 )
 
 selected_estrat = st.sidebar.selectbox(
     "Selecciona estratificación", 
     estrats_all, 
-    index=estrats_all.index(st.session_state.selected_strat),
+    index=estrats_all.index(st.session_state.selected_strat) if st.session_state.selected_strat in estrats_all else 0,
     key="strat_selector"
 )
 
@@ -517,45 +734,69 @@ origen_actual = prod['ORIGEN']
 
 # --- Inicialización mejorada de UserInputs ---
 def inicializar_datos_usuario(sel, prod, date_cols, user_existing_data=None):
-    """Inicializa o carga datos del usuario de manera optimizada"""
+    """Inicializa o carga datos del usuario manejando NaN para no revisados"""
     
     if sel in st.session_state.UserInputs:
         return st.session_state.UserInputs[sel]
     
     hist_mean = int(prod[date_cols].mean()) if not np.isnan(prod[date_cols].mean()) else 0
     
-    # Intentar cargar datos guardados
+    # Datos iniciales con NaN para indicar no revisado
     datos_iniciales = {
-        'Proyecciones': [hist_mean] * 12,
-        'Pedidos': [0] * 4,
-        'MOS': [4.0] * 4,
+        'Proyecciones': [np.nan] * 12,  # NaN indica no revisado
+        'Pedidos': [np.nan] * 4,
+        'MOS': [np.nan] * 4,
         'GUARDADO': False,
+        'REVISADO': False,  # Nueva bandera
         'last_update': datetime.now()
     }
     
     if user_existing_data is not None:
         user_prod_data = user_existing_data[user_existing_data['producto'] == sel]
         if not user_prod_data.empty:
-            proyecciones_user = [0] * 12
-            pedidos_user = [0] * 4
-            mos_user = [4.0] * 4
+            proyecciones_user = [np.nan] * 12
+            pedidos_user = [np.nan] * 4
+            mos_user = [np.nan] * 4
+            revisado = False
             
             proyecciones_data = user_prod_data[user_prod_data['tipo'] == 'proyeccion']
             for _, row in proyecciones_data.iterrows():
                 if 0 <= row['mes'] < 12:
-                    proyecciones_user[int(row['mes'])] = row['valor']
+                    # Mantener NaN si no está revisado, usar valor si existe
+                    if not pd.isna(row['valor']):
+                        proyecciones_user[int(row['mes'])] = row['valor']
+                    elif row.get('revisado', False):
+                        # Si está revisado y el valor es NaN, usar 0
+                        proyecciones_user[int(row['mes'])] = 0
             
             pedidos_data = user_prod_data[user_prod_data['tipo'] == 'pedido']
             for _, row in pedidos_data.iterrows():
                 if 0 <= row['mes_orden'] < 4:
                     idx = int(row['mes_orden'])
-                    pedidos_user[idx] = row['valor']
-                    mos_user[idx] = row['mos_objetivo']
+                    
+                    # Manejar valor del pedido
+                    if not pd.isna(row['valor']):
+                        pedidos_user[idx] = row['valor']
+                    elif row.get('revisado', False):
+                        pedidos_user[idx] = 0
+                    
+                    # Manejar MOS
+                    if not pd.isna(row['mos_objetivo']):
+                        mos_user[idx] = row['mos_objetivo']
+                    elif row.get('revisado', False):
+                        mos_user[idx] = 4.0  # Valor por defecto
+            
+            # Determinar si está revisado
+            if 'revisado' in user_prod_data.columns:
+                revisado_vals = user_prod_data['revisado'].dropna()
+                if not revisado_vals.empty:
+                    revisado = revisado_vals.iloc[0]
             
             datos_iniciales.update({
                 'Proyecciones': proyecciones_user,
                 'Pedidos': pedidos_user,
                 'MOS': mos_user,
+                'REVISADO': revisado,
                 'GUARDADO': True
             })
     
@@ -574,7 +815,7 @@ def auto_save():
     has_unsaved = any(not data.get('GUARDADO', False) for data in st.session_state.UserInputs.values())
     
     if has_unsaved and time_diff > 120:  # 2 minutos
-        if save_user_data(usuario, st.session_state.UserInputs):
+        if save_user_data_enhanced(usuario, st.session_state.UserInputs, "Autoguardado", False):
             st.session_state.last_save = current_time
             for product in st.session_state.UserInputs:
                 st.session_state.UserInputs[product]['GUARDADO'] = True
@@ -610,10 +851,10 @@ def calcular_stock_proyectado_corregido(proyecciones, pedidos_planificados, lead
             
             # Si la orden llega en este mes proyectado
             if mes_llegada_orden == mes_proyectado:
-                pedidos_que_llegan += pedido
+                pedidos_que_llegan += pedido if not pd.isna(pedido) else 0
         
         # Calcular demanda de este mes
-        demanda_mes = proyecciones[mes_proyectado] if mes_proyectado < len(proyecciones) else 0
+        demanda_mes = proyecciones[mes_proyectado] if (mes_proyectado < len(proyecciones) and not pd.isna(proyecciones[mes_proyectado])) else 0
         
         # Calcular nuevo stock
         nuevo_stock = stock_actual + pedidos_que_llegan - demanda_mes
@@ -651,24 +892,22 @@ def crear_visualizacion_principal_corregida(prod_codigo, proyecciones, pedidos, 
 
     proy_dates = pd.DatetimeIndex(proy_dates)
     
-    # Calcular stock proyectado CORREGIDO
+    # Calcular stock proyectado CORREGIDO (usar 0 para NaN)
+    proyecciones_numeric = [0 if pd.isna(p) else p for p in proyecciones]
+    pedidos_numeric = [0 if pd.isna(p) else p for p in pedidos]
+    
     stock_inicial = prod_row['Stock_Disponible']  # Stock al final de n-1 (noviembre)
     stock_proyectado = calcular_stock_proyectado_corregido(
-        proyecciones, pedidos, lead_time, stock_inicial, origen
+        proyecciones_numeric, pedidos_numeric, lead_time, stock_inicial, origen
     )
-    
-    # stock_proyectado[0] = stock al final de n-1 (noviembre)
-    # stock_proyectado[1] = stock al final de n (diciembre)
-    # stock_proyectado[2] = stock al final de n+1 (enero)
-    # stock_proyectado[13] = stock al final de n+12 (diciembre del siguiente año)
     
     # CALCULAR STOCK DE SEGURIDAD DINÁMICO POR MES CORREGIDO MEJORADO
     ss_dinamico_por_mes = []
     for mes in range(12):
         # Usar las proyecciones futuras para calcular variabilidad
         inicio_ss = max(0, mes - 5)  # Últimos 6 meses incluyendo el actual
-        fin_ss = min(mes + 1, len(proyecciones))
-        periodo_ss = proyecciones[inicio_ss:fin_ss]
+        fin_ss = min(mes + 1, len(proyecciones_numeric))
+        periodo_ss = proyecciones_numeric[inicio_ss:fin_ss]
         
         if len(periodo_ss) > 1:
             std_dinamico = np.std(periodo_ss)
@@ -691,24 +930,24 @@ def crear_visualizacion_principal_corregida(prod_codigo, proyecciones, pedidos, 
             
         ss_dinamico_por_mes.append(ss_mes)
     
-    # --- CAMBIO 2: Calcular stock necesario por lead time (demanda durante lead time) ---
+    # Calcular stock necesario por lead time (demanda durante lead time)
     stock_necesario_lead_time = []
     for mes in range(12):
         # Calcular demanda durante el lead time a partir de este mes
         inicio_demanda = mes
-        fin_demanda = min(mes + lead_time, len(proyecciones))
-        demanda_lead_time = sum(proyecciones[inicio_demanda:fin_demanda])
+        fin_demanda = min(mes + lead_time, len(proyecciones_numeric))
+        demanda_lead_time = sum(proyecciones_numeric[inicio_demanda:fin_demanda])
         
         # Si no hay suficientes meses de proyección, extrapolar
         if fin_demanda - inicio_demanda < lead_time:
             meses_faltantes = lead_time - (fin_demanda - inicio_demanda)
-            if len(proyecciones) > 0:
-                demanda_promedio = np.mean(proyecciones)
+            if len(proyecciones_numeric) > 0:
+                demanda_promedio = np.mean(proyecciones_numeric)
                 demanda_lead_time += demanda_promedio * meses_faltantes
         
         stock_necesario_lead_time.append(demanda_lead_time)
     
-    # --- CAMBIO 2: Calcular línea combinada (SS + Stock necesario por lead time) ---
+    # Calcular línea combinada (SS + Stock necesario por lead time)
     linea_combinada = []
     for mes in range(12):
         combinado = ss_dinamico_por_mes[mes] + stock_necesario_lead_time[mes]
@@ -728,10 +967,11 @@ def crear_visualizacion_principal_corregida(prod_codigo, proyecciones, pedidos, 
         secondary_y=False,
     )
     
-    # Proyecciones
+    # Proyecciones (solo mostrar si hay datos)
+    proyecciones_to_plot = [p if not pd.isna(p) else None for p in proyecciones[:12]]
     fig.add_trace(
         go.Scatter(
-            x=proy_dates, y=proyecciones[:12],
+            x=proy_dates, y=proyecciones_to_plot,
             mode='lines+markers', name='Ventas Proyectadas',
             line=dict(color='orange', width=3, dash='dash'),
             marker=dict(size=6, symbol='diamond'),
@@ -751,7 +991,7 @@ def crear_visualizacion_principal_corregida(prod_codigo, proyecciones, pedidos, 
         secondary_y=True,
     )
     
-    # --- CAMBIO 2: LÍNEA COMBINADA (SS + Stock necesario por lead time) ---
+    # LÍNEA COMBINADA (SS + Stock necesario por lead time)
     fig.add_trace(
         go.Scatter(
             x=proy_dates, y=linea_combinada[:12],
@@ -795,7 +1035,7 @@ def crear_visualizacion_principal_corregida(prod_codigo, proyecciones, pedidos, 
         showlegend=True,
         plot_bgcolor='rgba(240,240,240,0.1)',
         xaxis=dict(
-            tickformat='%b %Y',  # CAMBIO 3: Solo mes y año
+            tickformat='%b %Y',  # Solo mes y año
             tickmode='auto',
             nticks=12
         )
@@ -806,7 +1046,7 @@ def crear_visualizacion_principal_corregida(prod_codigo, proyecciones, pedidos, 
     
     return fig, stock_proyectado, ss_dinamico_por_mes, stock_necesario_lead_time, linea_combinada
 
-# --- BOTÓN PARA ACTUALIZAR CÁLCULOS (NUEVO) ---
+# --- BOTÓN PARA ACTUALIZAR CÁLCULOS ---
 st.subheader("🔄 Actualización de Cálculos")
 col_btn_update = st.columns([1, 2, 1])
 with col_btn_update[1]:
@@ -815,14 +1055,51 @@ with col_btn_update[1]:
         st.session_state.calculations_cache = {}  # Limpiar caché
         st.rerun()
 
+# --- Control de revisión (mover aquí antes del gráfico) ---
+col_rev1, col_rev2, col_rev3 = st.columns([2, 1, 1])
+
+with col_rev1:
+    # Indicador de estado
+    if user_data.get('REVISADO', False):
+        st.success("✅ **ESTADO: REVISADO**")
+    else:
+        st.warning("🔴 **ESTADO: NO REVISADO**")
+
+with col_rev2:
+    # Botón para marcar como revisado
+    if st.button("✅ Marcar como revisado", use_container_width=True, key=f"mark_reviewed_{sel}"):
+        user_data['REVISADO'] = True
+        user_data['last_update'] = datetime.now()
+        user_data['GUARDADO'] = False
+        st.success(f"Producto {sel} marcado como revisado")
+        st.rerun()
+
+with col_rev3:
+    # Botón para resetear revisión
+    if st.button("🔄 Resetear revisión", use_container_width=True, key=f"reset_reviewed_{sel}"):
+        user_data['REVISADO'] = False
+        user_data['last_update'] = datetime.now()
+        user_data['GUARDADO'] = False
+        st.warning(f"Estado de revisión reiniciado para {sel}")
+        st.rerun()
+
+st.markdown("---")
+
 # Generar y mostrar gráfico principal CORREGIDO
 current_proy = user_data['Proyecciones']
 current_pedidos = user_data['Pedidos']
 
-fig_principal, stock_proyectado, ss_dinamico_por_mes, stock_necesario_lead_time, linea_combinada = crear_visualizacion_principal_corregida(
-    sel, current_proy, current_pedidos, lead_time, origen_actual
-)
-st.plotly_chart(fig_principal, use_container_width=True)
+# Verificar si hay datos para mostrar
+has_proy_data = any(not pd.isna(p) for p in current_proy[:12])
+has_pedidos_data = any(not pd.isna(p) for p in current_pedidos)
+
+if has_proy_data or has_pedidos_data:
+    fig_principal, stock_proyectado, ss_dinamico_por_mes, stock_necesario_lead_time, linea_combinada = crear_visualizacion_principal_corregida(
+        sel, current_proy, current_pedidos, lead_time, origen_actual
+    )
+    st.plotly_chart(fig_principal, use_container_width=True)
+else:
+    st.info("ℹ️ No hay datos de proyección ingresados para este producto. Ingresa datos en la sección de abajo.")
 
 # --- Ventas proyectadas (12 meses) - CORRECCIÓN: Proyecciones de n a n+11 ---
 st.subheader("✍️ Ventas proyectadas (12 meses - n a n+11)")
@@ -846,33 +1123,42 @@ for col_idx in range(4):
             i = (col_idx * 3) + row_idx
             if i < 12:
                 key_name = f'proj_{sel}_{i}'
-                value_current = int(user_data['Proyecciones'][i])
+                current_value = user_data['Proyecciones'][i]
                 
-                # CAMBIO 3: Formato solo mes y año
-                mes_label = f"{proy_dates[i].strftime('%b %Y')} (n+{i})"
+                # Convertir NaN a None para el widget
+                display_value = 0 if pd.isna(current_value) else int(current_value)
+                
+                # Añadir indicador visual
+                if pd.isna(current_value):
+                    label_prefix = "🔴 "
+                    placeholder_text = "No revisado"
+                else:
+                    label_prefix = "✅ "
+                    placeholder_text = None
+                
+                mes_label = f"{label_prefix}{proy_dates[i].strftime('%b %Y')} (n+{i})"
                 
                 val = st.number_input(
                     mes_label, 
                     min_value=0, 
                     step=1, 
-                    value=value_current, 
+                    value=display_value,
+                    placeholder=placeholder_text,
                     key=key_name
                 )
                 
-                if val != user_data['Proyecciones'][i]:
+                # Si se ingresa un valor, marcar como revisado y actualizar
+                if val != display_value or (pd.isna(current_value) and val == 0):
                     user_data['Proyecciones'][i] = val
+                    user_data['REVISADO'] = True
                     user_data['last_update'] = datetime.now()
                     user_data['GUARDADO'] = False
 
 # --- Botón para actualizar gráfico después de las proyecciones ---
 col_btn_proj = st.columns([1, 2, 1])
 with col_btn_proj[1]:
-    if st.button("🔄 Actualizar Cálculos de Órdenes y Gráfico", type="primary", use_container_width=True):
+    if st.button("🔄 Actualizar Cálculos de Órdenes y Gráfico", type="primary", use_container_width=True, key=f"update_proj_{sel}"):
         st.session_state.recalculate_orders = True
-        # Recalcular el gráfico con las nuevas proyecciones
-        fig_principal, stock_proyectado, ss_dinamico_por_mes, stock_necesario_lead_time, linea_combinada = crear_visualizacion_principal_corregida(
-            sel, user_data['Proyecciones'], current_pedidos, lead_time, origen_actual
-        )
         st.rerun()
 
 # --- Métricas del producto mejoradas ---
@@ -1034,56 +1320,96 @@ for fecha_orden in fechas_ordenes:
     fecha_arribo = fecha_arribo + pd.offsets.MonthEnd(0)
     fechas_arribo.append(fecha_arribo)
 
-# Mostrar timeline CORREGIDO con formato CAMBIO 3
+# Mostrar timeline CORREGIDO con formato solo mes y año
 st.info(f"**Último dato histórico (n-1):** {ultima_fecha_hist.strftime('%b %Y')}")
 st.info(f"**Planificación actual (n):** {fecha_planificacion.strftime('%b %Y')}")
 st.info(f"**Primera orden (n+{meses_desde_planificacion[0]}):** {fechas_ordenes[0].strftime('%b %Y')}")
 st.info(f"**Primer arribo (n+{meses_desde_planificacion[0] + lead_time}):** {fechas_arribo[0].strftime('%b %Y')}")
 
-# --- BOTÓN DE ACTUALIZACIÓN DE CÁLCULOS PARA ÓRDENES (NUEVO) ---
+# --- BOTÓN DE ACTUALIZACIÓN DE CÁLCULOS PARA ÓRDENES ---
 st.markdown("---")
 col_btn_orders = st.columns([1, 2, 1])
 with col_btn_orders[1]:
-    if st.button("🔄 Actualizar Cálculos de Órdenes", type="secondary", use_container_width=True):
+    if st.button("🔄 Actualizar Cálculos de Órdenes", type="secondary", use_container_width=True, key=f"update_orders_{sel}"):
         st.session_state.force_recalculate = True
         st.rerun()
 
 orden_cols = st.columns(meses_pedido)
 
+# Preparar datos numéricos para cálculos (convertir NaN a 0)
+current_proy_numeric = [0 if pd.isna(p) else p for p in current_proy]
+current_pedidos_numeric = [0 if pd.isna(p) else p for p in current_pedidos]
+
 # CORRECCIÓN: Pre-calcular stock proyectado SIN cada pedido individualmente
 stocks_proyectados_sin_pedido = []
 for j in range(meses_pedido):
     # Crear copia de pedidos sin este pedido específico
-    pedidos_sin_este = current_pedidos.copy()
+    pedidos_sin_este = current_pedidos_numeric.copy()
     pedidos_sin_este[j] = 0  # Eliminar solo este pedido
     
     # Calcular stock proyectado sin este pedido
     stock_sin_este = calcular_stock_proyectado_corregido(
-        current_proy, pedidos_sin_este, lead_time, prod['Stock_Disponible'], origen_actual
+        current_proy_numeric, pedidos_sin_este, lead_time, prod['Stock_Disponible'], origen_actual
     )
     stocks_proyectados_sin_pedido.append(stock_sin_este)
 
 # Calcular stock proyectado CON todos los pedidos
 stock_proyectado_con_todos = calcular_stock_proyectado_corregido(
-    current_proy, current_pedidos, lead_time, prod['Stock_Disponible'], origen_actual
+    current_proy_numeric, current_pedidos_numeric, lead_time, prod['Stock_Disponible'], origen_actual
 )
+
+# Calcular SS dinámico por mes para los cálculos
+ss_dinamico_calc = []
+for mes in range(12):
+    # Usar las proyecciones futuras para calcular variabilidad
+    inicio_ss = max(0, mes - 5)
+    fin_ss = min(mes + 1, len(current_proy_numeric))
+    periodo_ss = current_proy_numeric[inicio_ss:fin_ss]
+    
+    if len(periodo_ss) > 1:
+        std_dinamico = np.std(periodo_ss)
+        media_dinamica = np.mean(periodo_ss)
+    else:
+        std_dinamico = prod['Desviacion']
+        media_dinamica = prod['Media']
+    
+    ss_base = z * std_dinamico * np.sqrt(lead_time)
+    ss_minimo = media_dinamica * 1.0
+    
+    if media_dinamica < 5:
+        ss_maximo = media_dinamica * 2.0
+        ss_mes = min(max(ss_base, ss_minimo), ss_maximo)
+    else:
+        ss_mes = max(ss_base, ss_minimo)
+        
+    ss_dinamico_calc.append(ss_mes)
 
 for j in range(meses_pedido):
     with orden_cols[j]:
         mes_offset = meses_desde_planificacion[j]
         
-        # CAMBIO 3: Formato solo mes y año
+        # Formato solo mes y año
         mes_label = f"{fechas_ordenes[j].strftime('%b %Y')} (n+{mes_offset})"
-        st.markdown(f"### 📅 {mes_label}")
+        
+        # Añadir indicador visual según si hay datos
+        current_pedido_val = user_data['Pedidos'][j]
+        if pd.isna(current_pedido_val):
+            label_prefix = "🔴 "
+            placeholder_text = "No revisado"
+        else:
+            label_prefix = "✅ "
+            placeholder_text = None
+        
+        st.markdown(f"### {label_prefix}📅 {mes_label}")
         
         # CÁLCULOS CON TIMING CORREGIDO
         mes_colocacion_orden = meses_desde_planificacion[j]  # Mes en que se coloca la orden desde planificación (n)
         mes_llegada_orden = mes_colocacion_orden + lead_time  # Mes en que llega la orden desde planificación (n)
         
-        # CAMBIO 1: Mostrar el MES SIGUIENTE para stock proyectado y MOS
+        # Mostrar el MES SIGUIENTE para stock proyectado y MOS
         mes_siguiente_llegada = mes_llegada_orden + 1  # Mes siguiente a la llegada
         
-        # Mostrar información de timing CORREGIDA con formato CAMBIO 3
+        # Mostrar información de timing CORREGIDA
         st.info(f"**Timing:** Orden n+{mes_colocacion_orden} → Llega n+{mes_llegada_orden}")
         st.info(f"**Arribo:** {fechas_arribo[j].strftime('%b %Y')} (n+{mes_llegada_orden})")
         
@@ -1108,7 +1434,7 @@ for j in range(meses_pedido):
             # Si excede el horizonte, extrapolar basándose en la tendencia
             stock_proyectado_llegada_sin_pedido = stocks_proyectados_sin_pedido[j][-1]
         
-        # --- CAMBIO 1: Stock proyectado al mes siguiente de la llegada CON la orden ---
+        # Stock proyectado al mes siguiente de la llegada CON la orden
         stock_proyectado_mes_siguiente_con_pedido = 0
         if mes_siguiente_llegada < len(stock_proyectado_con_todos):
             stock_proyectado_mes_siguiente_con_pedido = stock_proyectado_con_todos[mes_siguiente_llegada]
@@ -1118,38 +1444,42 @@ for j in range(meses_pedido):
         
         # Stock de seguridad dinámico para el mes siguiente de la llegada
         ss_para_mes_siguiente = prod['Stock_Seguridad_Base']
-        if mes_siguiente_llegada - 1 < len(ss_dinamico_por_mes):  # -1 porque ss_dinamico_por_mes[0] es para n
-            ss_para_mes_siguiente = ss_dinamico_por_mes[mes_siguiente_llegada - 1]
-        elif len(ss_dinamico_por_mes) > 0:
-            ss_para_mes_siguiente = ss_dinamico_por_mes[-1]
+        if mes_siguiente_llegada - 1 < len(ss_dinamico_calc):  # -1 porque ss_dinamico_calc[0] es para n
+            ss_para_mes_siguiente = ss_dinamico_calc[mes_siguiente_llegada - 1]
+        elif len(ss_dinamico_calc) > 0:
+            ss_para_mes_siguiente = ss_dinamico_calc[-1]
         
-        # --- CAMBIO 1: Calcular demanda promedio de los últimos 3 meses antes del mes siguiente ---
+        # Calcular demanda promedio de los últimos 3 meses antes del mes siguiente
         inicio_promedio_3m = max(0, mes_siguiente_llegada - 3)  # Últimos 3 meses antes del mes siguiente
         fin_promedio_3m = mes_siguiente_llegada  # Hasta el mes siguiente (excluido)
-        periodo_promedio_3m = current_proy[inicio_promedio_3m:fin_promedio_3m]
+        periodo_promedio_3m = current_proy_numeric[inicio_promedio_3m:fin_promedio_3m]
         
         demanda_promedio_3m = 0
         if len(periodo_promedio_3m) > 0:
             demanda_promedio_3m = np.mean(periodo_promedio_3m)
-        elif mes_siguiente_llegada - 1 < len(current_proy):
+        elif mes_siguiente_llegada - 1 < len(current_proy_numeric):
             # Si no hay 3 meses, usar el mes anterior al siguiente
-            demanda_promedio_3m = current_proy[mes_siguiente_llegada - 1]
-        elif len(current_proy) > 0:
+            demanda_promedio_3m = current_proy_numeric[mes_siguiente_llegada - 1]
+        elif len(current_proy_numeric) > 0:
             # Si no hay datos específicos, usar el promedio general
-            demanda_promedio_3m = np.mean(current_proy)
+            demanda_promedio_3m = np.mean(current_proy_numeric)
         
-        # --- CAMBIO 1: MOS proyectado al mes siguiente (con la orden) ---
+        # MOS proyectado al mes siguiente (con la orden)
         mos_proyectado_mes_siguiente_con_orden = 0
         if demanda_promedio_3m > 0:
             mos_proyectado_mes_siguiente_con_orden = stock_proyectado_mes_siguiente_con_pedido / demanda_promedio_3m
         
-        # Input de MOS objetivo (se mantiene para el mes de llegada)
+        # Input de MOS objetivo
+        current_mos_val = user_data['MOS'][j]
+        mos_display_val = 4.0 if pd.isna(current_mos_val) else float(current_mos_val)
+        
         mos_val = st.number_input(
             f'MOS objetivo al arribo', 
             min_value=1.0, 
             max_value=12.0, 
             step=0.5, 
-            value=user_data['MOS'][j],
+            value=mos_display_val,
+            placeholder="No revisado" if pd.isna(current_mos_val) else None,
             key=f'MOS_{sel}_{j}'
         )
         
@@ -1164,75 +1494,44 @@ for j in range(meses_pedido):
         st.metric("💡 Sugerido por MOS", f"{sugerido_mos:.0f}")
         st.metric("🛡️ Sugerido por SS", f"{sugerido_ss:.0f}")
         
-        # --- CAMBIO 1: Mostrar MOS proyectado al mes siguiente ---
+        # Mostrar MOS proyectado al mes siguiente
         st.info(f"**📊 MOS proyectado (mes siguiente):** {mos_proyectado_mes_siguiente_con_orden:.1f} meses")
         st.info(f"**📈 Demanda prom. 3m:** {demanda_promedio_3m:.1f}")
         st.info(f"**🛡️ SS dinámico (mes siguiente):** {ss_para_mes_siguiente:.0f}")
         
         # Input de pedido del usuario
+        pedido_display_val = 0 if pd.isna(current_pedido_val) else int(current_pedido_val)
+        
         plan_val = st.number_input(
             f'✏️ Orden a colocar', 
             min_value=0, 
             step=1, 
-            value=int(user_data['Pedidos'][j]), 
+            value=pedido_display_val,
+            placeholder=placeholder_text,
             key=f'order_{sel}_{j}'
         )
         
         # Actualizar datos
-        if plan_val != user_data['Pedidos'][j]:
+        if plan_val != pedido_display_val or (pd.isna(current_pedido_val) and plan_val == 0):
             user_data['Pedidos'][j] = plan_val
+            user_data['REVISADO'] = True
             user_data['last_update'] = datetime.now()
             user_data['GUARDADO'] = False
         
-        if user_data['MOS'][j] != mos_val:
+        if (not pd.isna(mos_val) and mos_val != mos_display_val) or (pd.isna(current_mos_val) and mos_val == 4.0):
             user_data['MOS'][j] = mos_val
+            user_data['REVISADO'] = True
             user_data['last_update'] = datetime.now()
             user_data['GUARDADO'] = False
         
-        # CORRECCIÓN: Mostrar stocks proyectados CON ETIQUETAS CORRECTAS
+        # Mostrar stocks proyectados
         st.metric("📦 Stock Proy. al Orden", f"{stock_proyectado_colocacion:.0f}")
         
-        # --- CAMBIO 1: Stock proyectado al mes siguiente de la llegada CON la orden ---
+        # Stock proyectado al mes siguiente de la llegada CON la orden
         st.metric("🚚 Stock Proy. al Mes Siguiente (con orden)", f"{stock_proyectado_mes_siguiente_con_pedido:.0f}")
         
-        # --- CAMBIO 1: Mostrar MOS al mes siguiente que considere la orden ---
+        # Mostrar MOS al mes siguiente que considere la orden
         st.metric("🎯 MOS al Mes Siguiente (con orden)", f"{mos_proyectado_mes_siguiente_con_orden:.1f} meses")
-        
-        # Información sobre qué está incluido
-        with st.expander("📊 Detalles del cálculo"):
-            # Mostrar qué pedidos están incluidos
-            if j > 0:
-                st.write("**✅ Pedidos anteriores INCLUIDOS en el cálculo:**")
-                for k in range(j):
-                    orden_num = k + 1
-                    mes_orden = meses_desde_planificacion[k]
-                    mes_llegada = meses_desde_planificacion[k] + lead_time
-                    cantidad = current_pedidos[k]
-                    st.write(f"• **Pedido {orden_num}:** {cantidad} unidades")
-                    st.write(f"  - Se coloca: n+{mes_orden} ({fechas_ordenes[k].strftime('%b %Y')})")
-                    st.write(f"  - Llega: n+{mes_llegada} ({fechas_arribo[k].strftime('%b %Y')})")
-            else:
-                st.write("**ℹ️ No hay pedidos anteriores incluidos**")
-            
-            # Mostrar cálculo del pedido sugerido
-            st.write("**🧮 Cálculo del pedido sugerido:**")
-            st.write(f"• **MOS objetivo:** {mos_val:.1f} meses")
-            st.write(f"• **Demanda promedio 3m:** {demanda_promedio_3m:.1f}")
-            st.write(f"• **Stock deseado:** {mos_val:.1f} × {demanda_promedio_3m:.1f} = {stock_deseado:.0f}")
-            st.write(f"• **Stock proyectado sin este pedido:** {stock_proyectado_llegada_sin_pedido:.0f}")
-            st.write(f"• **Pedido sugerido:** {stock_deseado:.0f} - {stock_proyectado_llegada_sin_pedido:.0f} = {sugerido_mos:.0f}")
-            
-            # Mostrar cálculo del MOS proyectado al mes siguiente
-            st.write("**📊 Cálculo del MOS proyectado (mes siguiente):**")
-            st.write(f"• **Stock proyectado con orden:** {stock_proyectado_mes_siguiente_con_pedido:.0f}")
-            st.write(f"• **Demanda promedio 3m:** {demanda_promedio_3m:.1f}")
-            st.write(f"• **MOS proyectado:** {stock_proyectado_mes_siguiente_con_pedido:.0f} ÷ {demanda_promedio_3m:.1f} = {mos_proyectado_mes_siguiente_con_orden:.1f} meses")
-            
-            # Mostrar información de timing
-            st.write("**📅 Resumen de fechas:**")
-            st.write(f"• **Fecha colocación orden:** {fechas_ordenes[j].strftime('%b %Y')}")
-            st.write(f"• **Fecha arribo pedido:** {fechas_arribo[j].strftime('%b %Y')}")
-            st.write(f"• **Mes siguiente analizado:** n+{mes_siguiente_llegada}")
 
 # --- Autoguardado periódico ---
 auto_save()
@@ -1257,11 +1556,55 @@ with col_status2:
         st.info(f"🕒 **Última actualización:** {last_update.strftime('%H:%M:%S')}")
 
 with col_status3:
-    if st.button("💾 Guardar Manualmente", type="primary", use_container_width=True):
-        if save_user_data(usuario, st.session_state.UserInputs):
+    if st.button("💾 Guardar Manualmente", type="primary", use_container_width=True, key=f"save_manual_{sel}"):
+        if save_user_data_enhanced(usuario, st.session_state.UserInputs, "", False):
             for product in st.session_state.UserInputs:
                 st.session_state.UserInputs[product]['GUARDADO'] = True
             st.session_state.last_save = datetime.now()
+            st.rerun()
+
+# --- Panel de resumen de revisión en Sidebar ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("📊 Resumen de Revisión")
+
+if st.session_state.UserInputs:
+    total_products = len(st.session_state.UserInputs)
+    reviewed_products = sum(1 for data in st.session_state.UserInputs.values() if data.get('REVISADO', False))
+    products_with_data = 0
+    
+    for data in st.session_state.UserInputs.values():
+        has_proy_data = any(not pd.isna(p) and p > 0 for p in data.get('Proyecciones', []))
+        has_pedidos_data = any(not pd.isna(p) and p > 0 for p in data.get('Pedidos', []))
+        if has_proy_data or has_pedidos_data:
+            products_with_data += 1
+    
+    completion_rate = (reviewed_products / total_products * 100) if total_products > 0 else 0
+    data_rate = (products_with_data / total_products * 100) if total_products > 0 else 0
+    
+    st.sidebar.metric("Productos totales", total_products)
+    st.sidebar.metric("Productos revisados", reviewed_products)
+    st.sidebar.metric("Productos con datos", products_with_data)
+    
+    st.sidebar.progress(completion_rate / 100, text=f"Revisión: {completion_rate:.1f}%")
+    st.sidebar.progress(data_rate / 100, text=f"Datos: {data_rate:.1f}%")
+    
+    # Campo para notas al guardar
+    notes = st.sidebar.text_area("📝 Notas para este guardado", height=80, key="save_notes")
+    
+    # Checkbox para marcar todo como revisado al guardar
+    mark_all_reviewed = st.sidebar.checkbox("✅ Marcar todos los productos como revisados al guardar", value=False, key="mark_all_reviewed")
+    
+    # Botón de guardado mejorado
+    if st.sidebar.button("💾 Guardar con estado actual", type="primary", use_container_width=True, key="save_enhanced"):
+        if mark_all_reviewed:
+            for product_data in st.session_state.UserInputs.values():
+                product_data['REVISADO'] = True
+        
+        if save_user_data_enhanced(usuario, st.session_state.UserInputs, notes, mark_all_reviewed):
+            for product in st.session_state.UserInputs:
+                st.session_state.UserInputs[product]['GUARDADO'] = True
+            st.session_state.last_save = datetime.now()
+            st.sidebar.success("✅ Guardado exitoso con metadatos")
             st.rerun()
 
 # --- ANÁLISIS DE COLORES ---
@@ -1422,12 +1765,14 @@ def generar_excel_mejorado():
             # Proyecciones
             proy_dates = pd.date_range(start=datetime.today(), periods=12, freq='MS')
             for i, v in enumerate(prod_data.get('Proyecciones', [])):
+                value_to_export = "" if pd.isna(v) else int(v)
                 all_data.append({
                     'Producto': prod_name,
                     'Tipo': 'Proyección',
                     'Mes': proy_dates[i].strftime('%Y-%m'),
-                    'Valor': int(v),
+                    'Valor': value_to_export,
                     'MOS_Objetivo': None,
+                    'Revisado': 'Sí' if prod_data.get('REVISADO', False) else 'No',
                     'Usuario': usuario,
                     'Fecha_Exportacion': fecha_export,
                     'Estado_Guardado': prod_data.get('GUARDADO', False)
@@ -1436,12 +1781,19 @@ def generar_excel_mejorado():
             # Pedidos
             order_dates = pd.date_range(start=datetime.today(), periods=4, freq='MS')
             for j in range(4):
+                pedido_val = prod_data.get('Pedidos', [np.nan]*4)[j]
+                mos_val = prod_data.get('MOS', [np.nan]*4)[j]
+                
+                pedido_to_export = "" if pd.isna(pedido_val) else int(pedido_val)
+                mos_to_export = "" if pd.isna(mos_val) else float(mos_val)
+                
                 all_data.append({
                     'Producto': prod_name,
                     'Tipo': 'Pedido',
                     'Mes_Orden': order_dates[j].strftime('%Y-%m'),
-                    'Valor': int(prod_data.get('Pedidos', [0]*4)[j]),
-                    'MOS_Objetivo': prod_data.get('MOS', [4.0]*4)[j],
+                    'Valor': pedido_to_export,
+                    'MOS_Objetivo': mos_to_export,
+                    'Revisado': 'Sí' if prod_data.get('REVISADO', False) else 'No',
                     'Usuario': usuario,
                     'Fecha_Exportacion': fecha_export,
                     'Estado_Guardado': prod_data.get('GUARDADO', False)
