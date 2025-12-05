@@ -139,7 +139,7 @@ def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False
         bucket = client.bucket(BUCKET_NAME)
         blob = bucket.blob(filename)
         
-        # Convertir datos a CSV optimizado (MANTENIENDO LA LÓGICA ORIGINAL)
+        # Convertir datos a CSV optimizado
         records = []
         timestamp = datetime.now().isoformat()
         
@@ -168,15 +168,12 @@ def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False
             
             if 'Proyecciones' in datos:
                 for i, proyeccion in enumerate(datos['Proyecciones']):
-                    # Guardar como NaN si es 0 y está marcado como no revisado
-                    value_to_save = proyeccion if (proyeccion > 0 or datos.get('REVISADO', False)) else np.nan
-                    
                     records.append({
                         'usuario': usuario,
                         'producto': producto,
                         'tipo': 'proyeccion',
                         'mes': i,
-                        'valor': value_to_save,
+                        'valor': proyeccion,
                         'mos_objetivo': None,
                         'revisado': datos.get('REVISADO', False),
                         'fecha_actualizacion': timestamp
@@ -184,17 +181,13 @@ def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False
             
             if 'Pedidos' in datos:
                 for i, (pedido, mos) in enumerate(zip(datos['Pedidos'], datos.get('MOS', [4.0]*4))):
-                    # Guardar como NaN si es 0 y está marcado como no revisado
-                    value_to_save = pedido if (pedido > 0 or datos.get('REVISADO', False)) else np.nan
-                    mos_to_save = mos if (not pd.isna(mos) or datos.get('REVISADO', False)) else np.nan
-                    
                     records.append({
                         'usuario': usuario,
                         'producto': producto,
                         'tipo': 'pedido',
                         'mes_orden': i,
-                        'valor': value_to_save,
-                        'mos_objetivo': mos_to_save,
+                        'valor': pedido,
+                        'mos_objetivo': mos,
                         'revisado': datos.get('REVISADO', False),
                         'fecha_actualizacion': timestamp
                     })
@@ -215,9 +208,9 @@ def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False
             'save_timestamp': timestamp
         }
         
-        # Convertir a CSV en memoria (manteniendo NaN como vacío)
+        # Convertir a CSV en memoria
         csv_buffer = io.StringIO()
-        df_save.to_csv(csv_buffer, index=False, na_rep='')
+        df_save.to_csv(csv_buffer, index=False)
         csv_content = csv_buffer.getvalue()
         
         # Subir a GCP con metadatos
@@ -250,7 +243,7 @@ def save_user_data(usuario, user_data):
         bucket = client.bucket(BUCKET_NAME)
         blob = bucket.blob(filename)
         
-        # Convertir datos a CSV optimizado (MANTENIENDO LÓGICA ORIGINAL)
+        # Convertir datos a CSV optimizado
         records = []
         timestamp = datetime.now().isoformat()
         
@@ -403,6 +396,9 @@ def initialize_session_state():
         st.session_state.loaded_external_data = None
     if 'current_username' not in st.session_state:
         st.session_state.current_username = "Usuario"
+    # NUEVO: Flag para indicar que se cargó un archivo externo
+    if 'external_file_loaded' not in st.session_state:
+        st.session_state.external_file_loaded = False
 
 initialize_session_state()
 
@@ -457,6 +453,7 @@ if st.session_state.user_files:
                 
                 # Guardar los datos cargados en el estado
                 st.session_state.loaded_external_data = loaded_data
+                st.session_state.external_file_loaded = True
                 
                 # Resetear UserInputs para forzar recarga
                 st.session_state.UserInputs = {}
@@ -478,25 +475,26 @@ if st.session_state.user_files:
 else:
     st.sidebar.info("No se encontraron archivos guardados")
 
-# --- Usuario y carga de datos optimizada (MANTENIENDO LÓGICA ORIGINAL) ---
+# --- Usuario y carga de datos optimizada ---
 usuario = st.sidebar.text_input("Nombre de usuario", value=st.session_state.current_username)
 
 # Actualizar estado si cambia el nombre de usuario
 if usuario != st.session_state.current_username:
     st.session_state.current_username = usuario
     st.session_state.data_loaded = False  # Forzar recarga de datos
+    st.session_state.external_file_loaded = False  # Resetear flag de archivo externo
 
 # Cargar datos existentes del usuario solo si es necesario
 if not st.session_state.data_loaded:
     # Primero intentar con datos cargados externamente
-    if st.session_state.loaded_external_data is not None:
+    if st.session_state.loaded_external_data is not None and st.session_state.external_file_loaded:
         user_existing_data = st.session_state.loaded_external_data['data']
         st.sidebar.success("✅ Datos cargados desde archivo seleccionado")
-        # Limpiar el estado después de usar
-        st.session_state.loaded_external_data = None
+        # IMPORTANTE: No limpiar aún, se necesita para procesar
     else:
-        # Si no hay datos externos, cargar los del usuario actual (LÓGICA ORIGINAL)
+        # Si no hay datos externos, cargar los del usuario actual
         user_existing_data = load_user_data(usuario)
+        st.session_state.external_file_loaded = False
     
     st.session_state.data_loaded = True
 else:
@@ -510,16 +508,17 @@ GCP_COLORS_PATH = "nissan/orders/vn_nissan_colors.csv"
 URL_ORDERS = "https://storage.googleapis.com/bk_vn/nissan/orders/vn_nissan_order.csv"
 URL_COLORS = "https://storage.googleapis.com/bk_vn/nissan/orders/vn_nissan_colors.csv"
 
-# Botón de recarga (LÓGICA ORIGINAL)
+# Botón de recarga
 if st.sidebar.button("🔄 Recargar datos"):
     st.cache_data.clear()
     st.session_state.data_loaded = False
     st.session_state.calculations_cache = {}
     st.session_state.current_product_index = 0
     st.session_state.product_key += 1
+    st.session_state.external_file_loaded = False
     st.rerun()
 
-# Carga de datos optimizada - Primero intenta desde GCP, luego desde URL (LÓGICA ORIGINAL)
+# Carga de datos optimizada - Primero intenta desde GCP, luego desde URL
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_all_data():
     with st.spinner("📥 Cargando datos desde Google Cloud Storage..."):
@@ -543,7 +542,7 @@ if df is None:
     st.error("❌ No se pudo cargar el archivo de órdenes.")
     st.stop()
 
-# --- Mapeo flexible de columnas mejorado (LÓGICA ORIGINAL) ---
+# --- Mapeo flexible de columnas mejorado ---
 def map_column_names(df):
     column_mapping = {}
     required_map = {
@@ -590,7 +589,7 @@ for col in columnas_opcionales:
     if col not in df.columns:
         df[col] = 0 if col.startswith('RES') else 'A'
 
-# --- Validación de datos mejorada (LÓGICA ORIGINAL) ---
+# --- Validación de datos mejorada ---
 def validar_datos_dataframe(df, date_cols):
     """Valida la integridad de los datos"""
     issues = []
@@ -617,7 +616,7 @@ def validar_datos_dataframe(df, date_cols):
     
     return issues
 
-# --- Configuración inicial optimizada (LÓGICA ORIGINAL) ---
+# --- Configuración inicial optimizada ---
 @st.cache_data(ttl=3600)
 def get_date_columns(df):
     date_cols = [c for c in df.columns if re.match(r'^\d{4}-\d{2}-\d{2}$', str(c))]
@@ -639,7 +638,7 @@ if validation_issues:
 num_months = st.sidebar.slider("Cantidad de meses a mostrar", 3, len(date_cols), min(12, len(date_cols)))
 date_cols = date_cols[-num_months:]
 
-# --- Lead time y nivel de servicio (LÓGICA ORIGINAL) ---
+# --- Lead time y nivel de servicio ---
 def get_lead_time(origen):
     """Define lead time según origen"""
     lead_times = {
@@ -654,7 +653,7 @@ nivel_servicio = st.sidebar.selectbox("Nivel de servicio (%)", options=[80,85,90
 z_dict = {80:0.84,85:1.04,90:1.28,95:1.65,97.5:1.96,99:2.33}
 z = z_dict[nivel_servicio]
 
-# --- Cálculos base optimizados CON STOCK DE SEGURIDAD DINÁMICO MEJORADO (LÓGICA ORIGINAL) ---
+# --- Cálculos base optimizados CON STOCK DE SEGURIDAD DINÁMICO MEJORADO ---
 @st.cache_data(ttl=3600)
 def calcular_metricas_base(df, date_cols, z):
     """Calcula métricas base de manera optimizada con stock de seguridad base MEJORADO"""
@@ -717,7 +716,7 @@ def calcular_metricas_base(df, date_cols, z):
 
 df = calcular_metricas_base(df, date_cols, z)
 
-# --- Pestañas para familias optimizadas (LÓGICA ORIGINAL) ---
+# --- Pestañas para familias optimizadas ---
 df['FAMILIA'] = df['CODIGO'].str[:3]
 familias = ['Todas'] + sorted(df['FAMILIA'].unique().tolist())
 estrats_all = ['Todas'] + sorted(df['ESTRAT'].dropna().unique().tolist())
@@ -761,7 +760,7 @@ if not productos:
     st.warning("No se encontraron productos para la combinación seleccionada.")
     st.stop()
 
-# --- Navegación mejorada (LÓGICA ORIGINAL) ---
+# --- Navegación mejorada ---
 col_nav1, col_nav2, col_nav3 = st.columns([1, 2, 1])
 
 with col_nav1:
@@ -799,62 +798,94 @@ prod = df[df['CODIGO'] == sel].iloc[0]
 lead_time = int(prod['Lead_Time'])
 origen_actual = prod['ORIGEN']
 
-# --- Inicialización de UserInputs (MODIFICADA PARA MANEJAR REVISIÓN) ---
+# --- CORRECCIÓN: Inicialización de UserInputs mejorada ---
 def inicializar_datos_usuario(sel, prod, date_cols, user_existing_data=None):
     """Inicializa o carga datos del usuario de manera optimizada"""
     
+    # Si ya existe en UserInputs, devolverlo
     if sel in st.session_state.UserInputs:
         return st.session_state.UserInputs[sel]
     
     hist_mean = int(prod[date_cols].mean()) if not np.isnan(prod[date_cols].mean()) else 0
     
-    # Datos iniciales (MANTENIENDO LÓGICA ORIGINAL PERO AÑADIENDO CAMPO REVISADO)
+    # Datos iniciales
     datos_iniciales = {
         'Proyecciones': [hist_mean] * 12,
         'Pedidos': [0] * 4,
         'MOS': [4.0] * 4,
         'GUARDADO': False,
-        'REVISADO': False,  # NUEVO: Campo para control de revisión
+        'REVISADO': False,
         'last_update': datetime.now()
     }
     
+    # Si hay datos existentes, procesarlos
     if user_existing_data is not None:
-        user_prod_data = user_existing_data[user_existing_data['producto'] == sel]
-        if not user_prod_data.empty:
-            proyecciones_user = [0] * 12
-            pedidos_user = [0] * 4
-            mos_user = [4.0] * 4
-            revisado = False
+        try:
+            # Filtrar datos para este producto
+            user_prod_data = user_existing_data[user_existing_data['producto'] == sel]
             
-            proyecciones_data = user_prod_data[user_prod_data['tipo'] == 'proyeccion']
-            for _, row in proyecciones_data.iterrows():
-                if 0 <= row['mes'] < 12:
-                    proyecciones_user[int(row['mes'])] = row['valor'] if not pd.isna(row['valor']) else 0
-            
-            pedidos_data = user_prod_data[user_prod_data['tipo'] == 'pedido']
-            for _, row in pedidos_data.iterrows():
-                if 0 <= row['mes_orden'] < 4:
-                    idx = int(row['mes_orden'])
-                    pedidos_user[idx] = row['valor'] if not pd.isna(row['valor']) else 0
-                    mos_user[idx] = row['mos_objetivo'] if not pd.isna(row['mos_objetivo']) else 4.0
-            
-            # Determinar si está revisado (buscar en columnas 'revisado' o metadata)
-            if 'revisado' in user_prod_data.columns:
-                revisado_vals = user_prod_data['revisado'].dropna()
-                if not revisado_vals.empty:
-                    revisado = bool(revisado_vals.iloc[0])
-            
-            datos_iniciales.update({
-                'Proyecciones': proyecciones_user,
-                'Pedidos': pedidos_user,
-                'MOS': mos_user,
-                'GUARDADO': True,
-                'REVISADO': revisado
-            })
+            if not user_prod_data.empty:
+                proyecciones_user = [hist_mean] * 12  # Inicializar con valores históricos
+                pedidos_user = [0] * 4
+                mos_user = [4.0] * 4
+                revisado = False
+                
+                # Procesar proyecciones
+                proyecciones_data = user_prod_data[user_prod_data['tipo'] == 'proyeccion']
+                for _, row in proyecciones_data.iterrows():
+                    if 0 <= row['mes'] < 12:
+                        value = row['valor']
+                        # Si el valor es NaN, mantener el valor histórico
+                        if pd.isna(value):
+                            proyecciones_user[int(row['mes'])] = hist_mean
+                        else:
+                            proyecciones_user[int(row['mes'])] = value
+                
+                # Procesar pedidos
+                pedidos_data = user_prod_data[user_prod_data['tipo'] == 'pedido']
+                for _, row in pedidos_data.iterrows():
+                    if 0 <= row['mes_orden'] < 4:
+                        idx = int(row['mes_orden'])
+                        value = row['valor']
+                        mos_value = row['mos_objetivo']
+                        
+                        # Si el valor es NaN, mantener 0
+                        if pd.isna(value):
+                            pedidos_user[idx] = 0
+                        else:
+                            pedidos_user[idx] = value
+                        
+                        # Si MOS es NaN, mantener 4.0
+                        if pd.isna(mos_value):
+                            mos_user[idx] = 4.0
+                        else:
+                            mos_user[idx] = mos_value
+                
+                # Determinar si está revisado
+                if 'revisado' in user_prod_data.columns:
+                    revisado_vals = user_prod_data['revisado'].dropna()
+                    if not revisado_vals.empty:
+                        # Tomar el valor más común
+                        revisado = bool(revisado_vals.mode().iloc[0] if not revisado_vals.mode().empty else revisado_vals.iloc[0])
+                
+                # Actualizar datos iniciales
+                datos_iniciales.update({
+                    'Proyecciones': proyecciones_user,
+                    'Pedidos': pedidos_user,
+                    'MOS': mos_user,
+                    'REVISADO': revisado,
+                    'GUARDADO': True
+                })
+                
+        except Exception as e:
+            st.warning(f"⚠️ Error al procesar datos cargados: {e}")
+            # Mantener datos iniciales por defecto
     
+    # Guardar en session state
     st.session_state.UserInputs[sel] = datos_iniciales
     return datos_iniciales
 
+# CORRECCIÓN: Pasar user_existing_data correctamente
 user_data = inicializar_datos_usuario(sel, prod, date_cols, user_existing_data)
 
 # --- Función de autoguardado mejorada ---
@@ -873,7 +904,7 @@ def auto_save():
                 st.session_state.UserInputs[product]['GUARDADO'] = True
             st.sidebar.success("💾 Autoguardado completado")
 
-# --- CÁLCULO DE STOCK PROYECTADO CON TIMING CORREGIDO (LÓGICA ORIGINAL) ---
+# --- CÁLCULO DE STOCK PROYECTADO CON TIMING CORREGIDO ---
 def calcular_stock_proyectado_corregido(proyecciones, pedidos_planificados, lead_time, stock_inicial, origen):
     """Calcula el stock proyectado con timing CORREGIDO según las especificaciones"""
     
@@ -914,7 +945,7 @@ def calcular_stock_proyectado_corregido(proyecciones, pedidos_planificados, lead
     
     return stock_proyectado
 
-# --- Visualización principal con SS dinámico CORREGIDO Y STOCK NECESARIO POR LEAD TIME (LÓGICA ORIGINAL) ---
+# --- Visualización principal con SS dinámico CORREGIDO Y STOCK NECESARIO POR LEAD TIME ---
 def crear_visualizacion_principal_corregida(prod_codigo, proyecciones, pedidos, lead_time, origen):
     """Crea la visualización principal con stock proyectado, SS dinámico y stock necesario por lead time"""
     prod_row = df[df['CODIGO'] == prod_codigo].iloc[0]
@@ -1094,7 +1125,7 @@ def crear_visualizacion_principal_corregida(prod_codigo, proyecciones, pedidos, 
     
     return fig, stock_proyectado, ss_dinamico_por_mes, stock_necesario_lead_time, linea_combinada
 
-# --- BOTÓN PARA ACTUALIZAR CÁLCULOS (LÓGICA ORIGINAL) ---
+# --- BOTÓN PARA ACTUALIZAR CÁLCULOS ---
 st.subheader("🔄 Actualización de Cálculos")
 col_btn_update = st.columns([1, 2, 1])
 with col_btn_update[1]:
@@ -1108,20 +1139,22 @@ col_rev1, col_rev2 = st.columns([3, 1])
 
 with col_rev1:
     # Indicador visual del estado de revisión
-    if user_data.get('REVISADO', False):
+    revisado_actual = user_data.get('REVISADO', False)
+    if revisado_actual:
         st.success("✅ **ESTADO: REVISADO** - Este producto ha sido analizado")
     else:
         st.warning("🔴 **ESTADO: NO REVISADO** - Este producto necesita análisis")
 
 with col_rev2:
     # Botón para cambiar estado de revisión
-    if st.button("🔄 Cambiar estado de revisión", key=f"toggle_review_{sel}"):
-        user_data['REVISADO'] = not user_data.get('REVISADO', False)
+    button_text = "✅ Marcar como revisado" if not revisado_actual else "🔄 Marcar como no revisado"
+    if st.button(button_text, key=f"toggle_review_{sel}", use_container_width=True):
+        user_data['REVISADO'] = not revisado_actual
         user_data['last_update'] = datetime.now()
         user_data['GUARDADO'] = False
         st.rerun()
 
-# Generar y mostrar gráfico principal CORREGIDO (LÓGICA ORIGINAL)
+# Generar y mostrar gráfico principal CORREGIDO
 current_proy = user_data['Proyecciones']
 current_pedidos = user_data['Pedidos']
 
@@ -1130,7 +1163,7 @@ fig_principal, stock_proyectado, ss_dinamico_por_mes, stock_necesario_lead_time,
 )
 st.plotly_chart(fig_principal, use_container_width=True)
 
-# --- Ventas proyectadas (12 meses) - CORRECCIÓN: Proyecciones de n a n+11 (LÓGICA ORIGINAL) ---
+# --- Ventas proyectadas (12 meses) - CORRECCIÓN: Proyecciones de n a n+11 ---
 st.subheader("✍️ Ventas proyectadas (12 meses - n a n+11)")
 
 # Calcular fechas de proyección (último día de cada mes, desde n hasta n+11)
@@ -1154,7 +1187,7 @@ for col_idx in range(4):
                 key_name = f'proj_{sel}_{i}'
                 value_current = int(user_data['Proyecciones'][i])
                 
-                # NUEVO: Añadir indicador visual si no está revisado
+                # NUEVO: Añadir indicador visual según estado de revisión
                 label_prefix = ""
                 if not user_data.get('REVISADO', False):
                     label_prefix = "⚠️ "
@@ -1174,7 +1207,7 @@ for col_idx in range(4):
                     user_data['last_update'] = datetime.now()
                     user_data['GUARDADO'] = False
 
-# --- Botón para actualizar gráfico después de las proyecciones (LÓGICA ORIGINAL) ---
+# --- Botón para actualizar gráfico después de las proyecciones ---
 col_btn_proj = st.columns([1, 2, 1])
 with col_btn_proj[1]:
     if st.button("🔄 Actualizar Cálculos de Órdenes y Gráfico", type="primary", use_container_width=True):
@@ -1185,7 +1218,7 @@ with col_btn_proj[1]:
         )
         st.rerun()
 
-# --- Métricas del producto mejoradas (LÓGICA ORIGINAL) ---
+# --- Métricas del producto mejoradas ---
 st.subheader(f"📊 Métricas del producto {sel}")
 col1, col2, col3 = st.columns(3)
 
@@ -1233,7 +1266,7 @@ with col3:
     else:
         st.success(f"📊 Variabilidad normal: CV={prod['Coef_Variacion']*100:.0f}%")
 
-# --- INVENTARIO DETALLADO (LÓGICA ORIGINAL) ---
+# --- INVENTARIO DETALLADO ---
 st.subheader("📦 Inventario Detallado (al final de n-1)")
 cols_inv = st.columns(4)
 cols_names = ['Stock', 'Tránsito', 'Pedidos', 'Reservas']
@@ -1268,7 +1301,7 @@ for col_name, col, data_cols in zip(cols_names, cols_inv, cols_data):
         else:
             st.info(f"No hay datos de {col_name}")
 
-# --- Totales (LÓGICA ORIGINAL) ---
+# --- Totales ---
 st.subheader("🧮 Totales de Inventario (al final de n-1)")
 tot_cols = st.columns(6)
 tot_cols[0].metric("Total Stock", f"{prod['Stock']:.0f}")
@@ -1278,7 +1311,7 @@ tot_cols[3].metric("Total Reservas", f"{prod['Total_Reservas']:.0f}")
 tot_cols[4].metric("Stock Disponible", f"{prod['Stock_Disponible']:.0f}")
 tot_cols[5].metric("Meses Inventario", f"{prod['Meses_Inventario']:.1f}")
 
-# --- ALERTAS (LÓGICA ORIGINAL) ---
+# --- ALERTAS ---
 st.subheader("⚠️ Alertas de Inventario")
 alert_col1, alert_col2, alert_col3 = st.columns(3)
 
@@ -1307,7 +1340,7 @@ with alert_col3:
     else:
         st.success("✅ Variabilidad normal")
 
-# --- ÓRDENES PLANIFICADAS CON TIMING CORREGIDO (LÓGICA ORIGINAL) ---
+# --- ÓRDENES PLANIFICADAS CON TIMING CORREGIDO ---
 st.subheader("✍️ Órdenes planificadas y sugeridas")
 st.info(f"ℹ️ Lead Time: {lead_time} meses | Nivel de servicio: {nivel_servicio}%")
 
@@ -1350,7 +1383,7 @@ st.info(f"**Planificación actual (n):** {fecha_planificacion.strftime('%b %Y')}
 st.info(f"**Primera orden (n+{meses_desde_planificacion[0]}):** {fechas_ordenes[0].strftime('%b %Y')}")
 st.info(f"**Primer arribo (n+{meses_desde_planificacion[0] + lead_time}):** {fechas_arribo[0].strftime('%b %Y')}")
 
-# --- BOTÓN DE ACTUALIZACIÓN DE CÁLCULOS PARA ÓRDENES (LÓGICA ORIGINAL) ---
+# --- BOTÓN DE ACTUALIZACIÓN DE CÁLCULOS PARA ÓRDENES ---
 st.markdown("---")
 col_btn_orders = st.columns([1, 2, 1])
 with col_btn_orders[1]:
@@ -1382,7 +1415,7 @@ for j in range(meses_pedido):
     with orden_cols[j]:
         mes_offset = meses_desde_planificacion[j]
         
-        # NUEVO: Añadir indicador visual si no está revisado
+        # NUEVO: Añadir indicador visual según estado de revisión
         label_prefix = ""
         if not user_data.get('REVISADO', False):
             label_prefix = "⚠️ "
@@ -1512,7 +1545,7 @@ for j in range(meses_pedido):
         # Mostrar MOS al mes siguiente que considere la orden
         st.metric("🎯 MOS al Mes Siguiente (con orden)", f"{mos_proyectado_mes_siguiente_con_orden:.1f} meses")
 
-# --- Autoguardado periódico (LÓGICA ORIGINAL) ---
+# --- Autoguardado periódico ---
 auto_save()
 
 # --- Estado de guardado mejorado ---
@@ -1574,7 +1607,7 @@ if st.session_state.UserInputs:
             st.sidebar.success("✅ Guardado exitoso con metadatos")
             st.rerun()
 
-# --- ANÁLISIS DE COLORES (LÓGICA ORIGINAL) ---
+# --- ANÁLISIS DE COLORES ---
 if df_colores is not None:
     st.title("🎨 Análisis de Velocidad de Venta por Color")
     
@@ -1719,7 +1752,7 @@ if df_colores is not None:
 else:
     st.info("💡 No se cargaron datos de colores")
 
-# --- EXPORTAR DATOS (LÓGICA ORIGINAL) ---
+# --- EXPORTAR DATOS ---
 st.subheader("📥 Descargar datos ingresados")
 
 def generar_excel_mejorado():
@@ -1738,7 +1771,7 @@ def generar_excel_mejorado():
                     'Mes': proy_dates[i].strftime('%Y-%m'),
                     'Valor': int(v),
                     'MOS_Objetivo': None,
-                    'Revisado': 'Sí' if prod_data.get('REVISADO', False) else 'No',  # NUEVO
+                    'Revisado': 'Sí' if prod_data.get('REVISADO', False) else 'No',
                     'Usuario': usuario,
                     'Fecha_Exportacion': fecha_export,
                     'Estado_Guardado': prod_data.get('GUARDADO', False)
@@ -1753,7 +1786,7 @@ def generar_excel_mejorado():
                     'Mes_Orden': order_dates[j].strftime('%Y-%m'),
                     'Valor': int(prod_data.get('Pedidos', [0]*4)[j]),
                     'MOS_Objetivo': prod_data.get('MOS', [4.0]*4)[j],
-                    'Revisado': 'Sí' if prod_data.get('REVISADO', False) else 'No',  # NUEVO
+                    'Revisado': 'Sí' if prod_data.get('REVISADO', False) else 'No',
                     'Usuario': usuario,
                     'Fecha_Exportacion': fecha_export,
                     'Estado_Guardado': prod_data.get('GUARDADO', False)
@@ -1801,7 +1834,7 @@ if excel_data:
 else:
     st.error("No se pudo generar archivo de exportación")
 
-# --- Footer informativo (LÓGICA ORIGINAL) ---
+# --- Footer informativo ---
 st.markdown("---")
 col_footer1, col_footer2, col_footer3 = st.columns(3)
 with col_footer1:
@@ -1811,7 +1844,7 @@ with col_footer2:
 with col_footer3:
     st.caption("🔄 Autoguardado activo")
 
-# --- Limpieza periódica de caché (LÓGICA ORIGINAL) ---
+# --- Limpieza periódica de caché ---
 if st.sidebar.button("🧹 Limpiar caché", type="secondary"):
     st.cache_data.clear()
     st.session_state.calculations_cache = {}
