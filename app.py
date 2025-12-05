@@ -90,11 +90,10 @@ def list_user_files():
         return []
 
 def load_selected_user_data(selected_file):
-    """Carga los datos de un archivo de usuario específico - REPARADA"""
+    """Carga los datos de un archivo de usuario específico"""
     try:
         client = get_gcp_client()
         if client is None:
-            st.error("❌ No se pudo inicializar cliente GCP")
             return None
         
         bucket = client.bucket(BUCKET_NAME)
@@ -106,41 +105,11 @@ def load_selected_user_data(selected_file):
         
         # Descargar contenido
         content = blob.download_as_text()
-        
-        # Leer CSV con manejo de errores
-        try:
-            df_loaded = pd.read_csv(io.StringIO(content))
-        except Exception as csv_error:
-            st.error(f"Error al leer CSV: {str(csv_error)}")
-            # Intentar con diferentes parámetros
-            df_loaded = pd.read_csv(io.StringIO(content), on_bad_lines='skip')
-        
-        # Verificar que el CSV tiene la estructura esperada
-        required_cols = ['producto', 'tipo', 'valor']
-        missing_cols = [col for col in required_cols if col not in df_loaded.columns]
-        
-        if missing_cols:
-            st.warning(f"⚠️ El archivo CSV no tiene todas las columnas esperadas. Faltan: {missing_cols}")
-            
-            # Intentar mapear nombres de columnas
-            column_mapping = {}
-            for col in required_cols:
-                # Buscar columnas similares
-                for csv_col in df_loaded.columns:
-                    if col in csv_col.lower() or csv_col.lower() in col:
-                        column_mapping[csv_col] = col
-                        break
-            
-            if column_mapping:
-                df_loaded = df_loaded.rename(columns=column_mapping)
-                st.info(f"✅ Columnas mapeadas: {column_mapping}")
+        df_loaded = pd.read_csv(io.StringIO(content))
         
         # Obtener metadatos
         blob.reload()
         metadata = blob.metadata or {}
-        
-        # DEBUG: Mostrar información del archivo cargado
-        # st.sidebar.write(f"DEBUG: Archivo cargado - Filas: {len(df_loaded)}, Columnas: {df_loaded.columns.tolist()}")
         
         return {
             'data': df_loaded,
@@ -150,10 +119,10 @@ def load_selected_user_data(selected_file):
         }
         
     except Exception as e:
-        st.error(f"❌ Error al cargar archivo: {str(e)}")
+        st.error(f"Error al cargar archivo: {str(e)}")
         return None
 
-# --- NUEVO: Función de guardado mejorada con metadatos Y campo revisado ---
+# --- NUEVO: Función de guardado mejorada con metadatos Y CAMPO REVISADO ---
 def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False):
     """Guarda los datos del usuario en GCP con metadatos mejorados"""
     try:
@@ -202,7 +171,7 @@ def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False
             if datos.get('REVISADO', False):
                 products_reviewed += 1
             
-            # GUARDAR PROYECCIONES con campo revisado
+            # GUARDAR PROYECCIONES con CAMPO REVISADO
             if 'Proyecciones' in datos:
                 for i, proyeccion in enumerate(datos['Proyecciones']):
                     records.append({
@@ -212,11 +181,11 @@ def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False
                         'mes': i,
                         'valor': proyeccion,
                         'mos_objetivo': None,
-                        'revisado': datos.get('REVISADO', False),  # GUARDAR ESTADO DE REVISIÓN
+                        'revisado': 'True' if datos.get('REVISADO', False) else 'False',  # GUARDAR ESTADO DE REVISIÓN
                         'fecha_actualizacion': timestamp
                     })
             
-            # GUARDAR PEDIDOS con campo revisado
+            # GUARDAR PEDIDOS con CAMPO REVISADO
             if 'Pedidos' in datos:
                 for i, (pedido, mos) in enumerate(zip(datos['Pedidos'], datos.get('MOS', [4.0]*4))):
                     records.append({
@@ -226,7 +195,7 @@ def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False
                         'mes_orden': i,
                         'valor': pedido,
                         'mos_objetivo': mos,
-                        'revisado': datos.get('REVISADO', False),  # GUARDAR ESTADO DE REVISIÓN
+                        'revisado': 'True' if datos.get('REVISADO', False) else 'False',  # GUARDAR ESTADO DE REVISIÓN
                         'fecha_actualizacion': timestamp
                     })
         
@@ -265,9 +234,9 @@ def save_user_data_enhanced(usuario, user_data, notes="", mark_as_reviewed=False
         st.error(f"❌ Error al guardar datos en GCP: {str(e)}")
         return False
 
-# --- Función original de guardado (ACTUALIZADA para incluir campo revisado) ---
+# --- Función original de guardado (actualizada para incluir CAMPO revisado) ---
 def save_user_data(usuario, user_data):
-    """Guarda los datos del usuario en GCP usando la API de Google Cloud Storage - REPARADA"""
+    """Guarda los datos del usuario en GCP usando la API de Google Cloud Storage"""
     try:
         if not usuario or usuario == "Usuario":
             st.warning("⚠️ Nombre de usuario no válido para guardar")
@@ -286,15 +255,7 @@ def save_user_data(usuario, user_data):
         records = []
         timestamp = datetime.now().isoformat()
         
-        # Contadores para metadatos
-        products_count = len(user_data)
-        products_reviewed = 0
-        
         for producto, datos in user_data.items():
-            # Contar productos revisados
-            if datos.get('REVISADO', False):
-                products_reviewed += 1
-            
             # GUARDAR PROYECCIONES
             if 'Proyecciones' in datos:
                 for i, proyeccion in enumerate(datos['Proyecciones']):
@@ -305,7 +266,7 @@ def save_user_data(usuario, user_data):
                         'mes': i,
                         'valor': proyeccion,
                         'mos_objetivo': None,
-                        'revisado': datos.get('REVISADO', False),  # ✅ AHORA SÍ INCLUYE REVISADO
+                        'revisado': 'True' if datos.get('REVISADO', False) else 'False',  # NUEVO: Campo revisado
                         'fecha_actualizacion': timestamp
                     })
             
@@ -319,7 +280,7 @@ def save_user_data(usuario, user_data):
                         'mes_orden': i,
                         'valor': pedido,
                         'mos_objetivo': mos,
-                        'revisado': datos.get('REVISADO', False),  # ✅ AHORA SÍ INCLUYE REVISADO
+                        'revisado': 'True' if datos.get('REVISADO', False) else 'False',  # NUEVO: Campo revisado
                         'fecha_actualizacion': timestamp
                     })
         
@@ -329,24 +290,12 @@ def save_user_data(usuario, user_data):
             
         df_save = pd.DataFrame(records)
         
-        # Configurar metadatos básicos
-        metadata = {
-            'reviewed': 'Yes' if products_reviewed > 0 else 'No',
-            'total_products': str(products_count),
-            'products_reviewed': str(products_reviewed),
-            'last_user': usuario,
-            'save_timestamp': timestamp
-        }
-        
-        # Asignar metadatos al blob
-        blob.metadata = metadata
-        
         # Convertir a CSV en memoria
         csv_buffer = io.StringIO()
         df_save.to_csv(csv_buffer, index=False)
         csv_content = csv_buffer.getvalue()
         
-        # Subir a GCP con metadatos
+        # Subir a GCP
         blob.upload_from_string(csv_content, content_type='text/csv')
         
         st.success(f"💾 Datos guardados exitosamente para {usuario}")
@@ -518,15 +467,11 @@ if st.session_state.user_files:
                 st.session_state.loaded_external_data = loaded_data
                 st.session_state.external_file_loaded = True
                 
-                # IMPORTANTE: Limpiar UserInputs y forzar recarga
+                # Resetear UserInputs para forzar recarga
                 st.session_state.UserInputs = {}
                 st.session_state.data_loaded = False
                 st.session_state.current_product_index = 0
                 st.session_state.product_key += 1
-                
-                # También limpiar el caché para asegurar datos frescos
-                if 'calculations_cache' in st.session_state:
-                    st.session_state.calculations_cache = {}
                 
                 # Mostrar información del archivo
                 st.sidebar.success(f"✅ Datos cargados exitosamente")
@@ -539,7 +484,6 @@ if st.session_state.user_files:
                 - Notas: {loaded_data['metadata'].get('notes', 'Ninguna')}
                 """)
                 
-                # Forzar rerun inmediato para procesar los datos
                 st.rerun()
 else:
     st.sidebar.info("No se encontraron archivos guardados")
@@ -559,6 +503,7 @@ if not st.session_state.data_loaded:
     if st.session_state.loaded_external_data is not None and st.session_state.external_file_loaded:
         user_existing_data = st.session_state.loaded_external_data['data']
         st.sidebar.success("✅ Datos cargados desde archivo seleccionado")
+        # IMPORTANTE: No limpiar aún, se necesita para procesar
     else:
         # Si no hay datos externos, cargar los del usuario actual
         user_existing_data = load_user_data(usuario)
@@ -573,8 +518,8 @@ GCP_ORDERS_PATH = "nissan/orders/vn_nissan_order.csv"
 GCP_COLORS_PATH = "nissan/orders/vn_nissan_colors.csv"
 
 # URLs de respaldo (por si falla la carga desde GCP)
-URL_ORDERS = "https://storage.googleapis.com/bk_vn/nissan/orders/vn_nissan_order.csv"
-URL_COLORS = "https://storage.googleapis.com/bk_vn/nissan/orders/vn_nissan_colors.csv"
+URL_ORDERS = "https://storage.googleapis.com/bk_vn/nissan/orders/vn_nissan_order.csv "
+URL_COLORS = "https://storage.googleapis.com/bk_vn/nissan/orders/vn_nissan_colors.csv "
 
 # Botón de recarga
 if st.sidebar.button("🔄 Recargar datos"):
@@ -695,13 +640,6 @@ date_cols = get_date_columns(df)
 if not date_cols:
     st.error("No se detectaron columnas de fechas.")
     st.stop()
-
-# Validar datos
-validation_issues = validar_datos_dataframe(df, date_cols)
-if validation_issues:
-    with st.expander("🔍 Issues de Validación de Datos"):
-        for issue in validation_issues:
-            st.write(issue)
 
 num_months = st.sidebar.slider("Cantidad de meses a mostrar", 3, len(date_cols), min(12, len(date_cols)))
 date_cols = date_cols[-num_months:]
@@ -866,9 +804,9 @@ prod = df[df['CODIGO'] == sel].iloc[0]
 lead_time = int(prod['Lead_Time'])
 origen_actual = prod['ORIGEN']
 
-# --- CORREGIDO: Inicialización de UserInputs mejorada y REPARADA ---
+# --- CORREGIDO: Inicialización de UserInputs mejorada ---
 def inicializar_datos_usuario(sel, prod, date_cols, user_existing_data=None):
-    """Inicializa o carga datos del usuario de manera optimizada - REPARADA"""
+    """Inicializa o carga datos del usuario de manera optimizada"""
     
     # Si ya existe en UserInputs, devolverlo
     if sel in st.session_state.UserInputs:
@@ -876,7 +814,7 @@ def inicializar_datos_usuario(sel, prod, date_cols, user_existing_data=None):
     
     hist_mean = int(prod[date_cols].mean()) if not np.isnan(prod[date_cols].mean()) else 0
     
-    # Datos iniciales por defecto
+    # Datos iniciales
     datos_iniciales = {
         'Proyecciones': [hist_mean] * 12,
         'Pedidos': [0] * 4,
@@ -889,129 +827,68 @@ def inicializar_datos_usuario(sel, prod, date_cols, user_existing_data=None):
     # Si hay datos existentes, procesarlos
     if user_existing_data is not None:
         try:
-            # Filtrar datos para este producto específico
-            # Asegurarnos de que el nombre de la columna sea correcto
-            if 'producto' in user_existing_data.columns:
-                user_prod_data = user_existing_data[user_existing_data['producto'] == sel]
-            elif 'Producto' in user_existing_data.columns:
-                user_prod_data = user_existing_data[user_existing_data['Producto'] == sel]
-                # Renombrar para consistencia
-                user_existing_data = user_existing_data.rename(columns={'Producto': 'producto'})
-                user_prod_data = user_existing_data[user_existing_data['producto'] == sel]
-            else:
-                # Intentar encontrar la columna con el nombre del producto
-                for col in user_existing_data.columns:
-                    if any(keyword in col.lower() for keyword in ['producto', 'codigo', 'modelo', 'sku']):
-                        user_existing_data = user_existing_data.rename(columns={col: 'producto'})
-                        user_prod_data = user_existing_data[user_existing_data['producto'] == sel]
-                        break
-                else:
-                    user_prod_data = pd.DataFrame()  # DataFrame vacío si no se encuentra
+            # Filtrar datos para este producto
+            user_prod_data = user_existing_data[user_existing_data['producto'] == sel]
             
             if not user_prod_data.empty:
-                # Inicializar arrays con valores por defecto
                 proyecciones_user = [hist_mean] * 12  # Inicializar con valores históricos
                 pedidos_user = [0] * 4
                 mos_user = [4.0] * 4
                 revisado = False
                 
-                # IMPORTANTE: Verificar si existe la columna 'revisado'
-                col_revisado = None
-                for col in user_prod_data.columns:
-                    if 'revisado' in col.lower():
-                        col_revisado = col
-                        break
-                
-                if col_revisado is not None:
+                # PROCESAR EL ESTADO DE REVISIÓN - CORRECCIÓN PRINCIPAL
+                if 'revisado' in user_prod_data.columns:
                     # Obtener el valor de revisado (debería ser el mismo para todas las filas del producto)
-                    revisado_vals = user_prod_data[col_revisado].dropna()
+                    revisado_vals = user_prod_data['revisado'].dropna()
                     if not revisado_vals.empty:
-                        # Convertir a booleano - manejar diferentes formatos
-                        val = revisado_vals.iloc[0]
-                        if isinstance(val, bool):
-                            revisado = val
-                        elif isinstance(val, str):
-                            revisado = val.lower() in ['true', 'yes', 'si', 'sí', '1', 'verdadero']
-                        elif isinstance(val, (int, float)):
-                            revisado = bool(val)
-                        else:
-                            revisado = False
+                        # Convertir string a booleano correctamente
+                        revisado_str = str(revisado_vals.iloc[0]).lower()
+                        revisado = (revisado_str == 'true' or revisado_str == '1' or revisado_str == 'yes')
                 
                 # Procesar proyecciones
-                if 'tipo' in user_prod_data.columns:
-                    proyecciones_data = user_prod_data[user_prod_data['tipo'] == 'proyeccion']
-                    
-                    for _, row in proyecciones_data.iterrows():
-                        # Verificar que tenemos la columna 'mes' y 'valor'
-                        if 'mes' in row and 'valor' in row:
-                            mes_idx = row['mes']
-                            # Asegurar que mes_idx sea un entero
-                            try:
-                                mes_idx = int(float(mes_idx))  # Manejar floats
-                            except:
-                                continue
-                                
-                            if 0 <= mes_idx < 12:
-                                value = row['valor']
-                                # Convertir a entero si es numérico
-                                if pd.notna(value):
-                                    try:
-                                        proyecciones_user[mes_idx] = int(float(value))
-                                    except:
-                                        proyecciones_user[mes_idx] = hist_mean
+                proyecciones_data = user_prod_data[user_prod_data['tipo'] == 'proyeccion']
+                for _, row in proyecciones_data.iterrows():
+                    if 0 <= row['mes'] < 12:
+                        value = row['valor']
+                        # Solo actualizar si no es NaN
+                        if not pd.isna(value):
+                            proyecciones_user[int(row['mes'])] = int(value)
                 
                 # Procesar pedidos
-                if 'tipo' in user_prod_data.columns:
-                    pedidos_data = user_prod_data[user_prod_data['tipo'] == 'pedido']
-                    
-                    for _, row in pedidos_data.iterrows():
-                        # Verificar que tenemos las columnas necesarias
-                        if 'mes_orden' in row and 'valor' in row:
-                            mes_idx = row['mes_orden']
-                            # Asegurar que mes_idx sea un entero
-                            try:
-                                mes_idx = int(float(mes_idx))
-                            except:
-                                continue
-                                
-                            if 0 <= mes_idx < 4:
-                                idx = int(mes_idx)
-                                
-                                # Procesar valor del pedido
-                                if 'valor' in row and pd.notna(row['valor']):
-                                    try:
-                                        pedidos_user[idx] = int(float(row['valor']))
-                                    except:
-                                        pedidos_user[idx] = 0
-                                
-                                # Procesar MOS objetivo
-                                if 'mos_objetivo' in row and pd.notna(row['mos_objetivo']):
-                                    try:
-                                        mos_user[idx] = float(row['mos_objetivo'])
-                                    except:
-                                        mos_user[idx] = 4.0
+                pedidos_data = user_prod_data[user_prod_data['tipo'] == 'pedido']
+                for _, row in pedidos_data.iterrows():
+                    if 0 <= row['mes_orden'] < 4:
+                        idx = int(row['mes_orden'])
+                        value = row['valor']
+                        mos_value = row['mos_objetivo']
+                        
+                        # Solo actualizar si no es NaN
+                        if not pd.isna(value):
+                            pedidos_user[idx] = int(value)
+                        
+                        if not pd.isna(mos_value):
+                            mos_user[idx] = float(mos_value)
                 
                 # Actualizar datos iniciales
                 datos_iniciales.update({
                     'Proyecciones': proyecciones_user,
                     'Pedidos': pedidos_user,
                     'MOS': mos_user,
-                    'REVISADO': revisado,  # Usar el valor cargado
-                    'GUARDADO': True,
-                    'loaded_from_file': True  # Marcar que fue cargado desde archivo
+                    'REVISADO': revisado,  # Usar el valor cargado correctamente
+                    'GUARDADO': True
                 })
                 
                 st.sidebar.success(f"✅ Datos cargados para {sel} | Revisado: {'Sí' if revisado else 'No'}")
                 
         except Exception as e:
-            st.sidebar.error(f"⚠️ Error al procesar datos cargados para {sel}: {str(e)}")
+            st.warning(f"⚠️ Error al procesar datos cargados para {sel}: {e}")
             # Mantener datos iniciales por defecto
     
     # Guardar en session state
     st.session_state.UserInputs[sel] = datos_iniciales
     return datos_iniciales
 
-# Pasar user_existing_data correctamente
+# CORRECCIÓN: Pasar user_existing_data correctamente
 user_data = inicializar_datos_usuario(sel, prod, date_cols, user_existing_data)
 
 # --- Función de autoguardado mejorada ---
